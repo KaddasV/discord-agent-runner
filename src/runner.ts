@@ -49,10 +49,11 @@ export class TaskRunner {
       // OpenCode CLI format: opencode run --prompt "<prompt>" --model "<model>"
       let args: string[] = [];
       if (cliTool.includes('opencode')) {
-        args = ['run', '--prompt', options.prompt];
+        args = ['run'];
         if (model) {
           args.push('--model', model);
         }
+        args.push(options.prompt);
       } else if (cliTool.includes('aider')) {
         args = ['--message', options.prompt];
         if (model) {
