@@ -34,25 +34,26 @@ class RepoManager {
         const entries = fs.readdirSync(baseDir, { withFileTypes: true });
         for (const entry of entries) {
           if (!entry.isDirectory()) continue;
-          if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'AppData') continue;
+          const ignoredDirs = [
+            'node_modules', 'AppData', 'Application Data', 'Contacts', 'Cookies',
+            'Desktop', 'Documents', 'Downloads', 'Favorites', 'Links', 'Local Settings',
+            'Music', 'My Documents', 'NetHood', 'OneDrive', 'Pictures', 'PrintHood',
+            'Recent', 'Saved Games', 'Searches', 'SendTo', 'Start Menu', 'Templates',
+            'Tracing', 'Videos', 'Intel'
+          ];
+          if (entry.name.startsWith('.') || ignoredDirs.includes(entry.name)) continue;
 
           const fullPath = path.join(baseDir, entry.name);
           const hasGit = fs.existsSync(path.join(fullPath, '.git'));
           const hasClaudeMd = fs.existsSync(path.join(fullPath, 'CLAUDE.md'));
-          const hasPackageJson = fs.existsSync(path.join(fullPath, 'package.json'));
-          const hasPomXml = fs.existsSync(path.join(fullPath, 'pom.xml'));
 
-          // Only add if it looks like a dev project or git repo
-          if (hasGit || hasClaudeMd || hasPackageJson || hasPomXml) {
-            // Avoid duplicate if already in customRepos
-            if (!repos.some((r) => path.resolve(r.path) === path.resolve(fullPath))) {
-              repos.push({
-                name: entry.name,
-                path: fullPath,
-                hasClaudeMd,
-                hasGit,
-              });
-            }
+          if (!repos.some((r) => path.resolve(r.path) === path.resolve(fullPath))) {
+            repos.push({
+              name: entry.name,
+              path: fullPath,
+              hasClaudeMd,
+              hasGit,
+            });
           }
         }
       } catch (err) {

@@ -90,7 +90,17 @@ client.once('ready', async () => {
 });
 
 client.on('interactionCreate', async (interaction: Interaction) => {
+  const userTag = `${interaction.user.username} (${interaction.user.id})`;
+  console.log(`[Interaction] Received ${interaction.type} (command/customId: ${interaction.isChatInputCommand() ? interaction.commandName : (interaction.isStringSelectMenu() ? interaction.customId : 'other')}) from ${userTag}`);
+
   if (!isInteractionForThisInstance(interaction.user.id)) {
+    console.warn(`[Interaction] ⚠️ Ignored unauthorized user ${userTag}. Bound to MY_USER_ID="${config.myUserId}" / ALLOWED="${config.allowedUserIds.join(',')}"`);
+    if (interaction.isRepliable()) {
+      await interaction.reply({
+        content: `⚠️ Unauthorized: This container instance is dedicated to user ID \`${config.myUserId || config.allowedUserIds.join(', ')}\`.`,
+        ephemeral: true,
+      }).catch(() => {});
+    }
     return;
   }
 
@@ -119,44 +129,60 @@ client.on('interactionCreate', async (interaction: Interaction) => {
     }
 
     if (commandName === 'repo') {
-      const repos = repoManager.discoverRepositories();
-      if (repos.length === 0) {
-        await interaction.reply({
-          content: `⚠️ No repositories found in \`${config.reposDir}\`. Please verify volume mounts or \`REPOS_DIR\` in \`.env\`.`,
-          ephemeral: true,
+      console.log(`[Command /repo] Executing for user ${interaction.user.username}`);
+      try {
+        const repos = repoManager.discoverRepositories();
+        console.log(`[Command /repo] Found ${repos.length} repos in ${config.reposDir}`);
+        if (repos.length === 0) {
+          await interaction.reply({
+            content: `⚠️ No repositories found in \`${config.reposDir}\`. Please verify volume mounts or \`REPOS_DIR\` in \`.env\`.`,
+            ephemeral: true,
+          });
+          return;
+        }
+
+        const activeRepo = repoManager.getActiveRepo(contextId);
+
+        const options = repos.map((r) => {
+          const desc = `${r.hasClaudeMd ? '📄 CLAUDE.md | ' : ''}${r.path}`;
+          return {
+            label: r.name.slice(0, 100),
+            description: desc.slice(0, 100),
+            value: r.name.slice(0, 100),
+            default: activeRepo === r.path || activeRepo === r.name,
+          };
         });
-        return;
+
+        const selectMenu = new StringSelectMenuBuilder()
+          .setCustomId(`select_repo_${interaction.user.id}`)
+          .setPlaceholder('📁 Choose repository to work on...')
+          .addOptions(options.slice(0, 25));
+
+        const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(selectMenu);
+
+        const repoEmbed = new EmbedBuilder()
+          .setTitle('📂 Repository Selector')
+          .setColor(0x00ffaa)
+          .setDescription(
+            activeRepo
+              ? `Current Active Repo: \`${path.basename(activeRepo)}\` (\`${activeRepo}\`)`
+              : 'No repository currently selected for this session.'
+          );
+
+        await interaction.reply({
+          embeds: [repoEmbed],
+          components: [row],
+        });
+        console.log(`[Command /repo] Successfully displayed repository dropdown menu.`);
+      } catch (err: any) {
+        console.error(`[Command /repo Error] Failed to execute /repo:`, err);
+        if (interaction.isRepliable()) {
+          await interaction.reply({
+            content: `❌ Error executing \`/repo\`: \`${err.message || err}\``,
+            ephemeral: true,
+          }).catch(() => {});
+        }
       }
-
-      const activeRepo = repoManager.getActiveRepo(contextId);
-
-      const options = repos.map((r) => ({
-        label: r.name,
-        description: `${r.hasClaudeMd ? '📄 CLAUDE.md | ' : ''}${r.path}`,
-        value: r.path,
-        default: activeRepo === r.path,
-      }));
-
-      const selectMenu = new StringSelectMenuBuilder()
-        .setCustomId(`select_repo_${interaction.user.id}`)
-        .setPlaceholder('📁 Choose repository to work on...')
-        .addOptions(options.slice(0, 25));
-
-      const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(selectMenu);
-
-      const repoEmbed = new EmbedBuilder()
-        .setTitle('📂 Repository Selector')
-        .setColor(0x00ffaa)
-        .setDescription(
-          activeRepo
-            ? `Current Active Repo: \`${path.basename(activeRepo)}\` (\`${activeRepo}\`)`
-            : 'No repository currently selected for this session.'
-        );
-
-      await interaction.reply({
-        embeds: [repoEmbed],
-        components: [row],
-      });
       return;
     }
 
@@ -279,27 +305,55 @@ client.on('interactionCreate', async (interaction: Interaction) => {
 
   // Handle Dropdown Menu Selection (/repo dropdown)
   if (interaction.isStringSelectMenu() && interaction.customId.startsWith('select_repo')) {
-    const selectedRepoPath = interaction.values[0];
-    repoManager.setActiveRepo(contextId, selectedRepoPath);
+    console.log(`[SelectMenu] Received selection from ${interaction.user.username}:`, interaction.values);
+    try {
+      const selectedValue = interaction.values[0];
+      const repos = repoManager.discoverRepositories();
+      const foundRepo = repos.find((r) => r.name === selectedValue || r.path === selectedValue);
+      const selectedRepoPath = foundRepo ? foundRepo.path : selectedValue;
 
-    const repoName = path.basename(selectedRepoPath);
-    const hasClaudeMd = fs.existsSync(path.join(selectedRepoPath, 'CLAUDE.md'));
+      repoManager.setActiveRepo(contextId, selectedRepoPath);
 
-    const activeEmbed = new EmbedBuilder()
-      .setTitle(`✅ Target Repository Set: ${repoName}`)
-      .setColor(0x2ecc71)
-      .setDescription(
-        `Target directory set to:\n\`${selectedRepoPath}\`\n\n` +
-          `${hasClaudeMd ? '📄 **CLAUDE.md Detected**: OpenCode CLI will respect repository guidelines.\n\n' : ''}` +
-          `Send instructions via \`/task prompt: "..."\`.`
-      );
+      const repoName = path.basename(selectedRepoPath);
+      const hasClaudeMd = fs.existsSync(path.join(selectedRepoPath, 'CLAUDE.md'));
 
-    await interaction.update({
-      embeds: [activeEmbed],
-      components: [],
-    });
+      const activeEmbed = new EmbedBuilder()
+        .setTitle(`✅ Target Repository Set: ${repoName}`)
+        .setColor(0x2ecc71)
+        .setDescription(
+          `Target directory set to:\n\`${selectedRepoPath}\`\n\n` +
+            `${hasClaudeMd ? '📄 **CLAUDE.md Detected**: OpenCode CLI will respect repository guidelines.\n\n' : ''}` +
+            `Send instructions via \`/task prompt: "..."\`.`
+        );
+
+      await interaction.update({
+        embeds: [activeEmbed],
+        components: [],
+      });
+      console.log(`[SelectMenu] Updated active repo for context ${contextId} to: ${selectedRepoPath}`);
+    } catch (err: any) {
+      console.error(`[SelectMenu Error] Failed to handle dropdown selection:`, err);
+      if (interaction.isRepliable()) {
+        await interaction.reply({
+          content: `❌ Error setting repository: \`${err.message || err}\``,
+          ephemeral: true,
+        }).catch(() => {});
+      }
+    }
     return;
   }
+});
+
+client.on('error', (error) => {
+  console.error('❌ Discord Client Error:', error);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('❌ Uncaught Exception:', err);
 });
 
 // Start client
