@@ -63,6 +63,133 @@ async function getOrCreateResultsChannel(guild: Guild): Promise<TextChannel | nu
   }
 }
 
+interface QueuedTask {
+  requestId: string;
+  contextId: string;
+  activeRepo: string;
+  prompt: string;
+  model: string;
+  userId: string;
+  channelId: string;
+  guild: Guild | null;
+}
+
+const taskQueue: Map<string, Array<QueuedTask>> = new Map();
+
+async function processNextInQueue(contextId: string): Promise<void> {
+  if (taskRunner.isRunning(contextId)) {
+    return;
+  }
+  const queue = taskQueue.get(contextId);
+  if (!queue || queue.length === 0) {
+    return;
+  }
+  const nextTask = queue.shift();
+  if (nextTask) {
+    console.log(`[TaskQueue] Dequeuing and starting task ${nextTask.requestId} for ${contextId}. Remaining in queue: ${queue.length}`);
+    await executeAndReportTask(nextTask);
+  }
+}
+
+async function executeAndReportTask(task: QueuedTask, initialInteraction?: any): Promise<void> {
+  const { requestId, contextId, activeRepo, prompt, model, userId, channelId, guild } = task;
+  const repoName = path.basename(activeRepo);
+
+  const startEmbed = new EmbedBuilder()
+    .setTitle(`⚡ Agent Task Launched [ID: ${requestId}] on [${repoName}]`)
+    .setColor(0x3498db)
+    .addFields(
+      { name: 'Request ID', value: `\`${requestId}\``, inline: true },
+      { name: 'User', value: `<@${userId}>`, inline: true },
+      { name: 'Repository', value: `\`${activeRepo}\``, inline: true },
+      { name: 'Model', value: `\`${model}\``, inline: true },
+      { name: 'Instruction', value: `"${prompt}"` }
+    )
+    .setFooter({ text: 'Executing locally on developer PC via OpenCode CLI...' });
+
+  if (initialInteraction) {
+    await initialInteraction.editReply({ embeds: [startEmbed] }).catch(() => {});
+  } else {
+    try {
+      const channel = await client.channels.fetch(channelId).catch(() => null) as TextChannel | null;
+      if (channel) {
+        await channel.send({ content: `<@${userId}>`, embeds: [startEmbed] });
+      }
+    } catch (e) {
+      console.error(`[TaskQueue Error] Failed to send startEmbed for ${requestId}:`, e);
+    }
+  }
+
+  let result = { exitCode: 1 as number | null, output: '(Error during execution)' };
+  try {
+    result = await taskRunner.executeTask(contextId, {
+      repoPath: activeRepo,
+      prompt,
+      model,
+    });
+  } catch (err: any) {
+    result = { exitCode: 1, output: `Exception in executeTask: ${err.message || err}` };
+  } finally {
+    const success = result.exitCode === 0;
+    const outputSnippet = result.output ? result.output.slice(-1800) : '(No output outputted)';
+
+    const completionEmbed = new EmbedBuilder()
+      .setTitle(success ? `✅ Task Completed [ID: ${requestId}] on [${repoName}]` : `⚠️ Task Finished [ID: ${requestId}] (Code: ${result.exitCode})`)
+      .setColor(success ? 0x2ecc71 : 0xe74c3c)
+      .addFields({ name: 'Request ID', value: `\`${requestId}\``, inline: true })
+      .setDescription(`**Output Log:**\n\`\`\`\n${outputSnippet}\n\`\`\``)
+      .setTimestamp();
+
+    if (initialInteraction) {
+      if (initialInteraction.channel && initialInteraction.channel instanceof TextChannel) {
+        await initialInteraction.channel.send({ content: `<@${userId}>`, embeds: [completionEmbed] }).catch(() => {});
+      } else {
+        await initialInteraction.followUp({ content: `<@${userId}>`, embeds: [completionEmbed] }).catch(() => {});
+      }
+    } else {
+      try {
+        const channel = await client.channels.fetch(channelId).catch(() => null) as TextChannel | null;
+        if (channel) {
+          await channel.send({ content: `<@${userId}>`, embeds: [completionEmbed] });
+        }
+      } catch (e) {
+        console.error(`[TaskQueue Error] Failed to send completionEmbed for ${requestId}:`, e);
+      }
+    }
+
+    if (guild) {
+      try {
+        const resultsChannel = await getOrCreateResultsChannel(guild);
+        if (resultsChannel) {
+          const statusEmbed = new EmbedBuilder()
+            .setTitle(success ? `✅ Task Execution Finished [${requestId}]` : `❌ Task Execution Failed [${requestId}]`)
+            .setColor(success ? 0x2ecc71 : 0xe74c3c)
+            .setDescription(success ? `The OpenCode prompt executed and finished successfully.` : `The OpenCode prompt failed during execution (Exit Code: ${result.exitCode}).`)
+            .addFields(
+              { name: 'Request ID', value: `\`${requestId}\``, inline: true },
+              { name: 'Status', value: success ? '✅ Finished Successfully' : `❌ Error (${result.exitCode})`, inline: true },
+              { name: 'User', value: `<@${userId}>`, inline: true },
+              { name: 'Repository', value: `\`${repoName}\``, inline: true },
+              { name: 'Channel', value: `<#${channelId}>`, inline: true },
+              { name: 'Model', value: `\`${model}\``, inline: true },
+              { name: 'Prompt', value: `"${prompt.length > 250 ? prompt.slice(0, 250) + '...' : prompt}"`, inline: false }
+            )
+            .setTimestamp();
+
+          await resultsChannel.send({ embeds: [statusEmbed] });
+          console.log(`[TaskResult] Posted completion status for ${requestId} to #${resultsChannel.name}`);
+        }
+      } catch (err) {
+        console.error(`[TaskResult Error] Failed to send notification to results channel:`, err);
+      }
+    }
+
+    setTimeout(() => {
+      processNextInQueue(contextId);
+    }, 1000);
+  }
+}
+
 client.once('ready', async () => {
   console.log(`🤖 Discord Agent Runner ONLINE as ${client.user?.tag}`);
   if (config.myUserId) {
@@ -220,6 +347,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
     if (commandName === 'status') {
       const activeRepo = repoManager.getActiveRepo(contextId);
       const running = taskRunner.isRunning(contextId);
+      const queue = taskQueue.get(contextId) || [];
 
       const statusEmbed = new EmbedBuilder()
         .setTitle('📊 Agent Runner Status')
@@ -228,6 +356,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
           { name: 'Target User ID', value: `\`${config.myUserId || 'Any'}\``, inline: true },
           { name: 'Active Repository', value: activeRepo ? `\`${activeRepo}\`` : '❌ None selected (Use `/repo`)', inline: false },
           { name: 'Task Execution Status', value: running ? '⚡ AI Agent is currently RUNNING...' : '💤 Idle', inline: false },
+          { name: 'Queued Tasks', value: queue.length > 0 ? `⏳ \`${queue.length}\` task(s) waiting in queue` : '0', inline: true },
           { name: 'Default Model', value: `\`${config.defaultModel}\``, inline: true },
           { name: 'CLI Tool', value: `\`${config.agentCli}\``, inline: true }
         );
@@ -238,11 +367,22 @@ client.on('interactionCreate', async (interaction: Interaction) => {
 
     if (commandName === 'cancel') {
       const canceled = taskRunner.cancelTask(contextId);
-      await interaction.reply({
-        content: canceled
-          ? '🛑 Successfully killed the running AI agent process.'
-          : 'ℹ️ No active task was running on this channel.',
-      });
+      const queue = taskQueue.get(contextId) || [];
+      const queueCount = queue.length;
+      taskQueue.set(contextId, []); // Clear queue
+
+      let msg = '';
+      if (canceled && queueCount > 0) {
+        msg = `🛑 Successfully killed the running AI agent process and cleared \`${queueCount}\` queued task(s).`;
+      } else if (canceled) {
+        msg = '🛑 Successfully killed the running AI agent process.';
+      } else if (queueCount > 0) {
+        msg = `🛑 Cleared \`${queueCount}\` queued task(s) (no active task was running).`;
+      } else {
+        msg = 'ℹ️ No active task or queued tasks found on this channel.';
+      }
+
+      await interaction.reply({ content: msg });
       return;
     }
 
@@ -283,84 +423,48 @@ client.on('interactionCreate', async (interaction: Interaction) => {
         return;
       }
 
-      if (taskRunner.isRunning(contextId)) {
-        await interaction.reply({
-          content: '⚠️ A task is already running in this session. Use `/cancel` to stop it first.',
-          ephemeral: true,
-        });
+      const prompt = interaction.options.getString('prompt', true);
+      const model = interaction.options.getString('model') || config.defaultModel;
+      const requestId = `REQ-${Date.now().toString().slice(-5)}${Math.floor(10 + Math.random() * 90)}`;
+
+      const newTask: QueuedTask = {
+        requestId,
+        contextId,
+        activeRepo,
+        prompt,
+        model,
+        userId: interaction.user.id,
+        channelId: interaction.channelId || interaction.user.id,
+        guild: interaction.guild || null,
+      };
+
+      const queue = taskQueue.get(contextId) || [];
+      if (taskRunner.isRunning(contextId) || queue.length > 0) {
+        queue.push(newTask);
+        taskQueue.set(contextId, queue);
+
+        await interaction.deferReply();
+        const queueEmbed = new EmbedBuilder()
+          .setTitle(`⏳ Agent Task Queued [ID: ${requestId}]`)
+          .setColor(0xf39c12)
+          .setDescription(`An agent task is currently executing in this session. Your instruction has been added to the execution queue.`)
+          .addFields(
+            { name: 'Request ID', value: `\`${requestId}\``, inline: true },
+            { name: 'Queue Position', value: `#${queue.length}`, inline: true },
+            { name: 'User', value: `<@${interaction.user.id}>`, inline: true },
+            { name: 'Repository', value: `\`${activeRepo}\``, inline: true },
+            { name: 'Model', value: `\`${model}\``, inline: true },
+            { name: 'Instruction', value: `"${prompt}"` }
+          )
+          .setTimestamp();
+
+        await interaction.editReply({ embeds: [queueEmbed] });
+        console.log(`[TaskQueue] Enqueued task ${requestId} for ${contextId}. Queue length: ${queue.length}`);
         return;
       }
 
-      const prompt = interaction.options.getString('prompt', true);
-      const model = interaction.options.getString('model') || config.defaultModel;
-
       await interaction.deferReply();
-
-      const requestId = `REQ-${Date.now().toString().slice(-5)}${Math.floor(10 + Math.random() * 90)}`;
-      const repoName = path.basename(activeRepo);
-      const startEmbed = new EmbedBuilder()
-        .setTitle(`⚡ Agent Task Launched [ID: ${requestId}] on [${repoName}]`)
-        .setColor(0x3498db)
-        .addFields(
-          { name: 'Request ID', value: `\`${requestId}\``, inline: true },
-          { name: 'User', value: `<@${interaction.user.id}>`, inline: true },
-          { name: 'Repository', value: `\`${activeRepo}\``, inline: true },
-          { name: 'Model', value: `\`${model}\``, inline: true },
-          { name: 'Instruction', value: `"${prompt}"` }
-        )
-        .setFooter({ text: 'Executing locally on developer PC via OpenCode CLI...' });
-
-      await interaction.editReply({ embeds: [startEmbed] });
-
-      const result = await taskRunner.executeTask(contextId, {
-        repoPath: activeRepo,
-        prompt,
-        model,
-      });
-
-      const success = result.exitCode === 0;
-      const outputSnippet = result.output ? result.output.slice(-1800) : '(No output outputted)';
-
-      const completionEmbed = new EmbedBuilder()
-        .setTitle(success ? `✅ Task Completed [ID: ${requestId}] on [${repoName}]` : `⚠️ Task Finished [ID: ${requestId}] (Code: ${result.exitCode})`)
-        .setColor(success ? 0x2ecc71 : 0xe74c3c)
-        .addFields({ name: 'Request ID', value: `\`${requestId}\``, inline: true })
-        .setDescription(`**Output Log:**\n\`\`\`\n${outputSnippet}\n\`\`\``)
-        .setTimestamp();
-
-      if (interaction.channel && interaction.channel instanceof TextChannel) {
-        await interaction.channel.send({ content: `<@${interaction.user.id}>`, embeds: [completionEmbed] });
-      } else {
-        await interaction.followUp({ content: `<@${interaction.user.id}>`, embeds: [completionEmbed] });
-      }
-
-      // Post concise completion notification to the dedicated results channel
-      if (interaction.guild) {
-        try {
-          const resultsChannel = await getOrCreateResultsChannel(interaction.guild);
-          if (resultsChannel) {
-            const statusEmbed = new EmbedBuilder()
-              .setTitle(success ? `✅ Task Execution Finished [${requestId}]` : `❌ Task Execution Failed [${requestId}]`)
-              .setColor(success ? 0x2ecc71 : 0xe74c3c)
-              .setDescription(success ? `The OpenCode prompt executed and finished successfully.` : `The OpenCode prompt failed during execution (Exit Code: ${result.exitCode}).`)
-              .addFields(
-                { name: 'Request ID', value: `\`${requestId}\``, inline: true },
-                { name: 'Status', value: success ? '✅ Finished Successfully' : `❌ Error (${result.exitCode})`, inline: true },
-                { name: 'User', value: `<@${interaction.user.id}>`, inline: true },
-                { name: 'Repository', value: `\`${repoName}\``, inline: true },
-                { name: 'Channel', value: `<#${interaction.channelId}>`, inline: true },
-                { name: 'Model', value: `\`${model}\``, inline: true },
-                { name: 'Prompt', value: `"${prompt.length > 250 ? prompt.slice(0, 250) + '...' : prompt}"`, inline: false }
-              )
-              .setTimestamp();
-
-            await resultsChannel.send({ embeds: [statusEmbed] });
-            console.log(`[TaskResult] Posted completion status for ${requestId} to #${resultsChannel.name}`);
-          }
-        } catch (err) {
-          console.error(`[TaskResult Error] Failed to send notification to results channel:`, err);
-        }
-      }
+      await executeAndReportTask(newTask, interaction);
       return;
     }
   }
