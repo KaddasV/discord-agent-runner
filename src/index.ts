@@ -169,17 +169,42 @@ async function executeAndReportTask(task: QueuedTask, initialInteraction?: any):
         .setStyle(ButtonStyle.Primary)
     );
 
+    let redeployAnnouncement = '';
+    const isRunnerApp = repoName.toLowerCase().includes('discord-agent-runner');
+    const isDeployOrUpdate = /deploy|redeploy|release|docker|push|build|restart|update|pr|merge/i.test(prompt) || /deploy|redeploy|release|docker|push|build|restart|update/i.test(fullOutputText);
+
+    if (isRunnerApp && success && isDeployOrUpdate) {
+      try {
+        let userTags = '@here @everyone';
+        if (guild) {
+          try {
+            const members = await guild.members.fetch();
+            const nonBotMembers = members.filter((m) => !m.user.bot);
+            if (nonBotMembers.size > 0 && nonBotMembers.size <= 80) {
+              userTags = nonBotMembers.map((m) => `<@${m.id}>`).join(' ');
+            }
+          } catch (intentErr) {
+            userTags = '@here @everyone';
+          }
+        }
+        redeployAnnouncement = `\n\n🚨 **ATTENTION ALL USERS** (${userTags}):\nThe \`discord-agent-runner\` app has just been modified and redeployed! Please pull the latest version and spin up your app/container instance (e.g. \`git pull && docker-compose up -d --build --force-recreate\`).`;
+      } catch (e) {
+        // If that's not possible, skip it
+        console.log('[Redeploy Notice] Skipped tagging all users:', e);
+      }
+    }
+
     if (initialInteraction) {
       if (initialInteraction.channel && initialInteraction.channel instanceof TextChannel) {
-        await initialInteraction.channel.send({ content: `<@${userId}>`, embeds: [completionEmbed], components: [followUpRow] }).catch(() => {});
+        await initialInteraction.channel.send({ content: `<@${userId}>${redeployAnnouncement}`, embeds: [completionEmbed], components: [followUpRow] }).catch(() => {});
       } else {
-        await initialInteraction.followUp({ content: `<@${userId}>`, embeds: [completionEmbed], components: [followUpRow] }).catch(() => {});
+        await initialInteraction.followUp({ content: `<@${userId}>${redeployAnnouncement}`, embeds: [completionEmbed], components: [followUpRow] }).catch(() => {});
       }
     } else {
       try {
         const channel = await client.channels.fetch(channelId).catch(() => null) as TextChannel | null;
         if (channel) {
-          await channel.send({ content: `<@${userId}>`, embeds: [completionEmbed], components: [followUpRow] });
+          await channel.send({ content: `<@${userId}>${redeployAnnouncement}`, embeds: [completionEmbed], components: [followUpRow] });
         }
       } catch (e) {
         console.error(`[TaskQueue Error] Failed to send completionEmbed for ${requestId}:`, e);
@@ -208,7 +233,7 @@ async function executeAndReportTask(task: QueuedTask, initialInteraction?: any):
             .setTimestamp();
 
           await resultsChannel.send({
-            content: `<@${userId}> 🔔 Your task \`${requestId}\` has finished executing! Type \`/result id:${requestId}\` to access the full logs and result details.`,
+            content: `<@${userId}> 🔔 Your task \`${requestId}\` has finished executing! Type \`/result id:${requestId}\` to access the full logs and result details.${redeployAnnouncement}`,
             embeds: [statusEmbed],
             components: [followUpRow],
           });
