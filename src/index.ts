@@ -8,6 +8,7 @@ import {
   TextChannel,
   ChannelType,
   CategoryChannel,
+  Guild,
 } from 'discord.js';
 import path from 'path';
 import fs from 'fs';
@@ -32,6 +33,34 @@ function isInteractionForThisInstance(userId: string): boolean {
     return config.allowedUserIds.includes(userId);
   }
   return true;
+}
+
+async function getOrCreateResultsChannel(guild: Guild): Promise<TextChannel | null> {
+  try {
+    const channels = await guild.channels.fetch();
+    let category = channels.find(
+      (c) => c && c.type === ChannelType.GuildCategory && c.name.toLowerCase().includes('agent')
+    ) as CategoryChannel | undefined;
+
+    const resultsChannelName = 'agent-results';
+    let resultsChannel = channels.find(
+      (c) => c && c.type === ChannelType.GuildText && c.name === resultsChannelName
+    ) as TextChannel | undefined;
+
+    if (!resultsChannel) {
+      resultsChannel = await guild.channels.create({
+        name: resultsChannelName,
+        type: ChannelType.GuildText,
+        parent: category?.id,
+        topic: '📊 Task Execution Results & Status Notifications (Whether prompts finished or not)',
+      });
+      console.log(`✅ Auto-created results channel '#${resultsChannelName}' in '${guild.name}'`);
+    }
+    return resultsChannel || null;
+  } catch (err) {
+    console.warn(`Failed to get/create results channel in '${guild?.name}':`, err);
+    return null;
+  }
 }
 
 client.once('ready', async () => {
@@ -83,6 +112,8 @@ client.once('ready', async () => {
           // Ignore missing permissions if channel creation fails
         }
       }
+
+      await getOrCreateResultsChannel(guild);
     }
   } catch (err) {
     console.warn('Channel auto-check completed.');
@@ -265,11 +296,13 @@ client.on('interactionCreate', async (interaction: Interaction) => {
 
       await interaction.deferReply();
 
+      const requestId = `REQ-${Date.now().toString().slice(-5)}${Math.floor(10 + Math.random() * 90)}`;
       const repoName = path.basename(activeRepo);
       const startEmbed = new EmbedBuilder()
-        .setTitle(`⚡ Agent Task Launched on [${repoName}]`)
+        .setTitle(`⚡ Agent Task Launched [ID: ${requestId}] on [${repoName}]`)
         .setColor(0x3498db)
         .addFields(
+          { name: 'Request ID', value: `\`${requestId}\``, inline: true },
           { name: 'User', value: `<@${interaction.user.id}>`, inline: true },
           { name: 'Repository', value: `\`${activeRepo}\``, inline: true },
           { name: 'Model', value: `\`${model}\``, inline: true },
@@ -289,8 +322,9 @@ client.on('interactionCreate', async (interaction: Interaction) => {
       const outputSnippet = result.output ? result.output.slice(-1800) : '(No output outputted)';
 
       const completionEmbed = new EmbedBuilder()
-        .setTitle(success ? `✅ Task Completed on [${repoName}]` : `⚠️ Task Finished (Code: ${result.exitCode})`)
+        .setTitle(success ? `✅ Task Completed [ID: ${requestId}] on [${repoName}]` : `⚠️ Task Finished [ID: ${requestId}] (Code: ${result.exitCode})`)
         .setColor(success ? 0x2ecc71 : 0xe74c3c)
+        .addFields({ name: 'Request ID', value: `\`${requestId}\``, inline: true })
         .setDescription(`**Output Log:**\n\`\`\`\n${outputSnippet}\n\`\`\``)
         .setTimestamp();
 
@@ -298,6 +332,34 @@ client.on('interactionCreate', async (interaction: Interaction) => {
         await interaction.channel.send({ content: `<@${interaction.user.id}>`, embeds: [completionEmbed] });
       } else {
         await interaction.followUp({ content: `<@${interaction.user.id}>`, embeds: [completionEmbed] });
+      }
+
+      // Post concise completion notification to the dedicated results channel
+      if (interaction.guild) {
+        try {
+          const resultsChannel = await getOrCreateResultsChannel(interaction.guild);
+          if (resultsChannel) {
+            const statusEmbed = new EmbedBuilder()
+              .setTitle(success ? `✅ Task Execution Finished [${requestId}]` : `❌ Task Execution Failed [${requestId}]`)
+              .setColor(success ? 0x2ecc71 : 0xe74c3c)
+              .setDescription(success ? `The OpenCode prompt executed and finished successfully.` : `The OpenCode prompt failed during execution (Exit Code: ${result.exitCode}).`)
+              .addFields(
+                { name: 'Request ID', value: `\`${requestId}\``, inline: true },
+                { name: 'Status', value: success ? '✅ Finished Successfully' : `❌ Error (${result.exitCode})`, inline: true },
+                { name: 'User', value: `<@${interaction.user.id}>`, inline: true },
+                { name: 'Repository', value: `\`${repoName}\``, inline: true },
+                { name: 'Channel', value: `<#${interaction.channelId}>`, inline: true },
+                { name: 'Model', value: `\`${model}\``, inline: true },
+                { name: 'Prompt', value: `"${prompt.length > 250 ? prompt.slice(0, 250) + '...' : prompt}"`, inline: false }
+              )
+              .setTimestamp();
+
+            await resultsChannel.send({ embeds: [statusEmbed] });
+            console.log(`[TaskResult] Posted completion status for ${requestId} to #${resultsChannel.name}`);
+          }
+        } catch (err) {
+          console.error(`[TaskResult Error] Failed to send notification to results channel:`, err);
+        }
       }
       return;
     }
