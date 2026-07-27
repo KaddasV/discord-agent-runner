@@ -49,7 +49,7 @@ export class TaskRunner {
       // OpenCode CLI format: opencode run --prompt "<prompt>" --model "<model>"
       let args: string[] = [];
       if (cliTool.includes('opencode')) {
-        args = ['run'];
+        args = ['run', '--format', 'json'];
         if (model) {
           args.push('--model', model);
         }
@@ -93,10 +93,32 @@ export class TaskRunner {
 
       proc.on('close', (code) => {
         this.activeProcesses.delete(contextId);
-        if (options.onFinish) {
-          options.onFinish(code, fullOutput);
+
+        // Extract clean text if json lines were received
+        let cleanedOutput = fullOutput;
+        if (cliTool.includes('opencode') && fullOutput.includes('{"type":')) {
+          const lines = fullOutput.split('\n');
+          let textAccumulator = '';
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const obj = JSON.parse(line.trim());
+              if (obj.type === 'text' && obj.part && obj.part.text) {
+                textAccumulator += obj.part.text + '\n';
+              }
+            } catch {
+              // Ignore non-json lines
+            }
+          }
+          if (textAccumulator.trim()) {
+            cleanedOutput = textAccumulator.trim();
+          }
         }
-        resolve({ exitCode: code, output: fullOutput });
+
+        if (options.onFinish) {
+          options.onFinish(code, cleanedOutput);
+        }
+        resolve({ exitCode: code, output: cleanedOutput });
       });
 
       proc.on('error', (err) => {
