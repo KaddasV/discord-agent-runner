@@ -6,6 +6,8 @@ import {
   EmbedBuilder,
   Interaction,
   TextChannel,
+  ChannelType,
+  CategoryChannel,
 } from 'discord.js';
 import path from 'path';
 import fs from 'fs';
@@ -23,19 +25,13 @@ const client = new Client({
 });
 
 function isInteractionForThisInstance(userId: string): boolean {
-  // If MY_USER_ID is configured, ONLY process interactions belonging to this user
   if (config.myUserId) {
-    return interactionBelongsToMe(userId);
+    return config.myUserId === userId;
   }
-  // Otherwise fallback to allowedUserIds list
   if (config.allowedUserIds.length > 0) {
     return config.allowedUserIds.includes(userId);
   }
   return true;
-}
-
-function interactionBelongsToMe(userId: string): boolean {
-  return config.myUserId === userId;
 }
 
 client.once('ready', async () => {
@@ -45,13 +41,56 @@ client.once('ready', async () => {
   } else {
     console.log(`🌍 Container Instance listening for shared/allowed users.`);
   }
+
   await registerSlashCommands();
+
+  // Ensure dedicated channel exists per user/instance
+  try {
+    const guilds = await client.guilds.fetch();
+    for (const [guildId] of guilds) {
+      const guild = await client.guilds.fetch(guildId);
+      const channels = await guild.channels.fetch();
+
+      let category = channels.find(
+        (c) => c && c.type === ChannelType.GuildCategory && c.name.toLowerCase().includes('agent')
+      ) as CategoryChannel | undefined;
+
+      let targetChannelName = 'agent-runner';
+      if (config.myUserId) {
+        try {
+          const user = await client.users.fetch(config.myUserId);
+          const cleanName = user.username.toLowerCase().replace(/[^a-z0-9]/g, '');
+          targetChannelName = `agent-${cleanName}`;
+        } catch (e) {
+          // ignore
+        }
+      }
+
+      let dedicatedChannel = channels.find(
+        (c) => c && c.type === ChannelType.GuildText && c.name === targetChannelName
+      ) as TextChannel | undefined;
+
+      if (!dedicatedChannel) {
+        try {
+          dedicatedChannel = await guild.channels.create({
+            name: targetChannelName,
+            type: ChannelType.GuildText,
+            parent: category?.id,
+            topic: `🤖 Dedicated AI Agent Execution Channel for User ID: ${config.myUserId || 'Shared'}`,
+          });
+          console.log(`✅ Auto-created channel '#${targetChannelName}' in '${guild.name}'`);
+        } catch (err) {
+          // Ignore missing permissions if channel creation fails
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('Channel auto-check completed.');
+  }
 });
 
 client.on('interactionCreate', async (interaction: Interaction) => {
-  // Check if this interaction is meant for this specific container instance
   if (!isInteractionForThisInstance(interaction.user.id)) {
-    // Silently ignore so the user's own matching container instance handles it
     return;
   }
 
@@ -63,17 +102,17 @@ client.on('interactionCreate', async (interaction: Interaction) => {
 
     if (commandName === 'help') {
       const helpEmbed = new EmbedBuilder()
-        .setTitle('🤖 Discord Agent Runner - Help')
+        .setTitle('🤖 Discord Agent Runner - Command Reference')
         .setColor(0x5865f2)
         .setDescription('Control your PC\'s AI coding agents remotely from Discord!')
         .addFields(
-          { name: '/repo', value: 'Select or switch target repository from dropdown menu.' },
-          { name: '/task <prompt> [model]', value: 'Run OpenCode agent in selected repo (e.g. `--model deepseek-v4`).' },
-          { name: '/status', value: 'View current active repo and running background task.' },
-          { name: '/verify', value: 'Run verification suite (`./mvnw test` / `npm test`) on active repo.' },
-          { name: '/cancel', value: 'Kill currently running AI task.' }
+          { name: '📁 `/repo`', value: 'Select or switch target repository from dropdown menu.' },
+          { name: '⚡ `/task prompt: "..." [model: "..."]`', value: 'Run OpenCode agent in selected repo (e.g. `--model opencode/deepseek-v4-flash-free`).' },
+          { name: '📊 `/status`', value: 'View current active repo, target user binding, and runner state.' },
+          { name: '🧪 `/verify`', value: 'Run test suite (`./mvnw test` / `npm test`) on active repo.' },
+          { name: '🛑 `/cancel`', value: 'Kill currently running AI task.' }
         )
-        .setFooter({ text: `Instance User: ${config.myUserId || 'Shared'} | Powered by OpenCode` });
+        .setFooter({ text: `User Binding: ${config.myUserId || 'Shared'} | OpenCode CLI v1.18.7` });
 
       await interaction.reply({ embeds: [helpEmbed] });
       return;
