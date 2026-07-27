@@ -83,6 +83,28 @@ export const slashCommands = [
     ),
 
   new SlashCommandBuilder()
+    .setName('followup')
+    .setDescription('Queue a follow-up command for a previous task result')
+    .addStringOption((option) =>
+      option
+        .setName('id')
+        .setDescription('The previous Task ID to follow up on (e.g. REQ-12345)')
+        .setRequired(true)
+    )
+    .addStringOption((option) =>
+      option
+        .setName('prompt')
+        .setDescription('Instruction for the follow-up action')
+        .setRequired(true)
+    )
+    .addStringOption((option) =>
+      option
+        .setName('model')
+        .setDescription('AI model override (optional)')
+        .setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
     .setName('help')
     .setDescription('Show help and instructions for the Discord Agent Runner'),
 ].map((cmd) => cmd.toJSON());

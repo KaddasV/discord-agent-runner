@@ -3,6 +3,11 @@ import {
   GatewayIntentBits,
   ActionRowBuilder,
   StringSelectMenuBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
   EmbedBuilder,
   AttachmentBuilder,
   Interaction,
@@ -157,17 +162,24 @@ async function executeAndReportTask(task: QueuedTask, initialInteraction?: any):
       .setFooter({ text: `Type /result id:${requestId} to retrieve full execution logs & details.` })
       .setTimestamp();
 
+    const followUpRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`followup_btn_${requestId}`)
+        .setLabel('💬 Queue Follow-Up Task')
+        .setStyle(ButtonStyle.Primary)
+    );
+
     if (initialInteraction) {
       if (initialInteraction.channel && initialInteraction.channel instanceof TextChannel) {
-        await initialInteraction.channel.send({ content: `<@${userId}>`, embeds: [completionEmbed] }).catch(() => {});
+        await initialInteraction.channel.send({ content: `<@${userId}>`, embeds: [completionEmbed], components: [followUpRow] }).catch(() => {});
       } else {
-        await initialInteraction.followUp({ content: `<@${userId}>`, embeds: [completionEmbed] }).catch(() => {});
+        await initialInteraction.followUp({ content: `<@${userId}>`, embeds: [completionEmbed], components: [followUpRow] }).catch(() => {});
       }
     } else {
       try {
         const channel = await client.channels.fetch(channelId).catch(() => null) as TextChannel | null;
         if (channel) {
-          await channel.send({ content: `<@${userId}>`, embeds: [completionEmbed] });
+          await channel.send({ content: `<@${userId}>`, embeds: [completionEmbed], components: [followUpRow] });
         }
       } catch (e) {
         console.error(`[TaskQueue Error] Failed to send completionEmbed for ${requestId}:`, e);
@@ -192,12 +204,13 @@ async function executeAndReportTask(task: QueuedTask, initialInteraction?: any):
               { name: 'Inspect Logs & Results', value: `Use \`/result id:${requestId}\` to download full logs & view output`, inline: false },
               { name: 'Prompt', value: `"${prompt.length > 250 ? prompt.slice(0, 250) + '...' : prompt}"`, inline: false }
             )
-            .setFooter({ text: `Type /result id:${requestId} to retrieve full execution logs & details.` })
+            .setFooter({ text: `Type /result id:${requestId} or click below to queue a follow-up.` })
             .setTimestamp();
 
           await resultsChannel.send({
             content: `<@${userId}> 🔔 Your task \`${requestId}\` has finished executing! Type \`/result id:${requestId}\` to access the full logs and result details.`,
             embeds: [statusEmbed],
+            components: [followUpRow],
           });
           console.log(`[TaskResult] Posted completion status for ${requestId} to #${resultsChannel.name}`);
         }
@@ -358,6 +371,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
           { name: '⚡ `/task prompt: "..."`', value: 'Run any instruction for the agent (ssh somewhere, research a topic, code).' },
           { name: '🎫 `/ticket title: "..." description: "..."`', value: 'Create a GitHub issue/ticket in this repository.' },
           { name: '🚀 `/feature prompt: "..."`', value: 'Implement a feature, create a PR, merge it, and deploy.' },
+          { name: '💬 `/followup id: "..." prompt: "..."`', value: 'Queue a follow-up command for a previous task result.' },
           { name: '📜 `/result id: "..."`', value: 'Fetch full execution logs and downloadable log file for a completed task by ID.' },
           { name: '📊 `/status`', value: 'View current active repo, target user binding, and runner state.' },
           { name: '🧪 `/verify`', value: 'Run test suite (`./mvnw test` / `npm test`) on active repo.' },
@@ -501,7 +515,14 @@ client.on('interactionCreate', async (interaction: Interaction) => {
         .setDescription(`**Output Log Preview:**\n\`\`\`\n${snippet}\n\`\`\``)
         .setFooter({ text: 'Use this Request ID to inspect full execution logs anytime.' });
 
-      const replyOptions: any = { embeds: [resultEmbed] };
+      const followUpRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`followup_btn_${logData.requestId}`)
+          .setLabel('💬 Queue Follow-Up Task')
+          .setStyle(ButtonStyle.Primary)
+      );
+
+      const replyOptions: any = { embeds: [resultEmbed], components: [followUpRow] };
 
       if (logData.output && logData.output.length > 1800) {
         const buffer = Buffer.from(logData.output, 'utf-8');
@@ -510,6 +531,31 @@ client.on('interactionCreate', async (interaction: Interaction) => {
       }
 
       await interaction.editReply(replyOptions);
+      return;
+    }
+
+    if (commandName === 'followup') {
+      const parentId = interaction.options.getString('id', true);
+      const userPrompt = interaction.options.getString('prompt', true);
+      const logData = getTaskLog(parentId);
+
+      if (!logData) {
+        await interaction.reply({
+          content: `❌ Could not find execution logs for Task ID \`${parentId}\`. Verify the ID is correct.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      if (logData && logData.repo) {
+        repoManager.setActiveRepo(contextId, logData.repo);
+      }
+
+      const parentContext = logData ? `\n\n[Context from parent task ${parentId}]: "${logData.prompt.slice(0, 300)}..."` : '';
+      const fullPrompt = `${userPrompt}${parentContext}`;
+      const model = interaction.options.getString('model') || (logData && logData.model) || config.defaultModel;
+
+      await handleAgentCommand(interaction, contextId, fullPrompt, model, `Follow-Up to ${parentId}`);
       return;
     }
 
@@ -602,6 +648,44 @@ client.on('interactionCreate', async (interaction: Interaction) => {
         }).catch(() => {});
       }
     }
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId.startsWith('followup_btn_')) {
+    const parentId = interaction.customId.replace('followup_btn_', '');
+    const modal = new ModalBuilder()
+      .setCustomId(`modal_followup_${parentId}`)
+      .setTitle(`Follow-Up to ${parentId.slice(-10)}`);
+
+    const promptInput = new TextInputBuilder()
+      .setCustomId('followup_prompt_input')
+      .setLabel('What should the agent do next?')
+      .setStyle(TextInputStyle.Paragraph)
+      .setPlaceholder('e.g. Fix the failing test on line 42 and re-run verify')
+      .setRequired(true);
+
+    const firstActionRow = new ActionRowBuilder<TextInputBuilder>().addComponents(promptInput);
+    modal.addComponents(firstActionRow);
+
+    await interaction.showModal(modal);
+    return;
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId.startsWith('modal_followup_')) {
+    const parentId = interaction.customId.replace('modal_followup_', '');
+    const logData = getTaskLog(parentId);
+    const userPrompt = interaction.fields.getTextInputValue('followup_prompt_input');
+
+    const contextId = interaction.channelId || interaction.user.id;
+    if (logData && logData.repo) {
+      repoManager.setActiveRepo(contextId, logData.repo);
+    }
+
+    const parentContext = logData ? `\n\n[Context from parent task ${parentId}]: "${logData.prompt.slice(0, 300)}..."` : '';
+    const fullPrompt = `${userPrompt}${parentContext}`;
+    const model = (logData && logData.model) || config.defaultModel;
+
+    await handleAgentCommand(interaction as any, contextId, fullPrompt, model, `Follow-Up to ${parentId}`);
     return;
   }
 });
