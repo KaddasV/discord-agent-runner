@@ -370,7 +370,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
           { name: '📁 `/repo`', value: 'Select or switch target repository from dropdown menu.' },
           { name: '⚡ `/task prompt: "..."`', value: 'Run any instruction for the agent (ssh somewhere, research a topic, code).' },
           { name: '🎫 `/ticket title: "..." description: "..."`', value: 'Create a GitHub issue/ticket in this repository.' },
-          { name: '🚀 `/feature prompt: "..."`', value: 'Implement a feature, create a PR, merge it, and deploy.' },
+          { name: '🚀 `/feature prompt: "..."`', value: 'Cut branch from latest develop, implement feature, PR, merge & deploy.' },
           { name: '💬 `/followup id: "..." prompt: "..."`', value: 'Queue a follow-up command for a previous task result.' },
           { name: '📜 `/result id: "..."`', value: 'Fetch full execution logs and downloadable log file for a completed task by ID.' },
           { name: '📊 `/status`', value: 'View current active repo, target user binding, and runner state.' },
@@ -605,7 +605,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
     if (commandName === 'feature') {
       const userPrompt = interaction.options.getString('prompt', true);
       const model = interaction.options.getString('model') || config.defaultModel;
-      const prompt = `Implement the following feature in this codebase autonomously:\n\n"${userPrompt}"\n\nExecute the following workflow strictly:\n1. Create a new git feature branch.\n2. Write code and implement the feature, including tests.\n3. Verify that tests and build pass.\n4. Commit changes and push the feature branch to remote origin.\n5. Create a GitHub Pull Request (using gh pr create).\n6. Merge the Pull Request (using gh pr merge).\n7. If there are deployment scripts or continuous deployment workflows, ensure the feature is deployed or trigger the deployment.\nReport the PR link, merge status, and deployment results when finished.`;
+      const prompt = `Implement the following feature in this codebase autonomously:\n\n"${userPrompt}"\n\nExecute the following workflow strictly:\n1. Always fetch the latest changes from remote (git fetch origin), checkout and pull the latest 'develop' branch (or 'dev' / 'main' if develop does not exist), and cut a new git feature branch strictly from there.\n2. Write code and implement the feature, including tests.\n3. Verify that tests and build pass.\n4. Commit changes and push the feature branch to remote origin.\n5. Create a GitHub Pull Request targeting develop (using gh pr create).\n6. Merge the Pull Request (using gh pr merge).\n7. If there are deployment scripts or continuous deployment workflows, ensure the feature is deployed or trigger the deployment.\nReport the PR link, merge status, and deployment results when finished.`;
       await handleAgentCommand(interaction, contextId, prompt, model, 'Feature Implementation & Deploy');
       return;
     }

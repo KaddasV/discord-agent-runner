@@ -46,7 +46,7 @@ export const slashCommands = [
 
   new SlashCommandBuilder()
     .setName('feature')
-    .setDescription('Implement a feature, create a PR, merge it, and deploy')
+    .setDescription('Cut branch from latest develop, implement feature, PR, merge & deploy')
     .addStringOption((option) =>
       option
         .setName('prompt')
