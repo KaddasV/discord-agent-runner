@@ -8,6 +8,7 @@ import {
   TextChannel,
 } from 'discord.js';
 import path from 'path';
+import fs from 'fs';
 import { config } from './config';
 import { repoManager } from './repoManager';
 import { taskRunner } from './runner';
@@ -21,24 +22,36 @@ const client = new Client({
   ],
 });
 
-function isUserAllowed(userId: string): boolean {
-  if (config.allowedUserIds.length === 0) return true; // If empty, allow anyone on server
-  return config.allowedUserIds.includes(userId);
+function isInteractionForThisInstance(userId: string): boolean {
+  // If MY_USER_ID is configured, ONLY process interactions belonging to this user
+  if (config.myUserId) {
+    return interactionBelongsToMe(userId);
+  }
+  // Otherwise fallback to allowedUserIds list
+  if (config.allowedUserIds.length > 0) {
+    return config.allowedUserIds.includes(userId);
+  }
+  return true;
+}
+
+function interactionBelongsToMe(userId: string): boolean {
+  return config.myUserId === userId;
 }
 
 client.once('ready', async () => {
-  console.log(`🤖 Discord Agent Runner is ONLINE as ${client.user?.tag}`);
+  console.log(`🤖 Discord Agent Runner ONLINE as ${client.user?.tag}`);
+  if (config.myUserId) {
+    console.log(`👤 Dedicated Container Instance assigned to Discord User ID: ${config.myUserId}`);
+  } else {
+    console.log(`🌍 Container Instance listening for shared/allowed users.`);
+  }
   await registerSlashCommands();
 });
 
 client.on('interactionCreate', async (interaction: Interaction) => {
-  if (!isUserAllowed(interaction.user.id)) {
-    if (interaction.isRepliable()) {
-      await interaction.reply({
-        content: '⛔ Security Restriction: Your Discord User ID is not authorized to control this agent runner.',
-        ephemeral: true,
-      });
-    }
+  // Check if this interaction is meant for this specific container instance
+  if (!isInteractionForThisInstance(interaction.user.id)) {
+    // Silently ignore so the user's own matching container instance handles it
     return;
   }
 
@@ -60,7 +73,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
           { name: '/verify', value: 'Run verification suite (`./mvnw test` / `npm test`) on active repo.' },
           { name: '/cancel', value: 'Kill currently running AI task.' }
         )
-        .setFooter({ text: 'Powered by OpenCode CLI & Discord.js' });
+        .setFooter({ text: `Instance User: ${config.myUserId || 'Shared'} | Powered by OpenCode` });
 
       await interaction.reply({ embeds: [helpEmbed] });
       return;
@@ -70,7 +83,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
       const repos = repoManager.discoverRepositories();
       if (repos.length === 0) {
         await interaction.reply({
-          content: `⚠️ No repositories found in \`${config.reposDir}\`. Please check your configuration or add repos in \`.env\`.`,
+          content: `⚠️ No repositories found in \`${config.reposDir}\`. Please verify volume mounts or \`REPOS_DIR\` in \`.env\`.`,
           ephemeral: true,
         });
         return;
@@ -86,9 +99,9 @@ client.on('interactionCreate', async (interaction: Interaction) => {
       }));
 
       const selectMenu = new StringSelectMenuBuilder()
-        .setCustomId('select_repo')
+        .setCustomId(`select_repo_${interaction.user.id}`)
         .setPlaceholder('📁 Choose repository to work on...')
-        .addOptions(options.slice(0, 25)); // Discord dropdown limit: 25 items
+        .addOptions(options.slice(0, 25));
 
       const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(selectMenu);
 
@@ -98,7 +111,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
         .setDescription(
           activeRepo
             ? `Current Active Repo: \`${path.basename(activeRepo)}\` (\`${activeRepo}\`)`
-            : 'No repository currently selected for this channel.'
+            : 'No repository currently selected for this session.'
         );
 
       await interaction.reply({
@@ -116,6 +129,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
         .setTitle('📊 Agent Runner Status')
         .setColor(running ? 0xffaa00 : 0x00ffbb)
         .addFields(
+          { name: 'Target User ID', value: `\`${config.myUserId || 'Any'}\``, inline: true },
           { name: 'Active Repository', value: activeRepo ? `\`${activeRepo}\`` : '❌ None selected (Use `/repo`)', inline: false },
           { name: 'Task Execution Status', value: running ? '⚡ AI Agent is currently RUNNING...' : '💤 Idle', inline: false },
           { name: 'Default Model', value: `\`${config.defaultModel}\``, inline: true },
@@ -149,7 +163,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
       await interaction.deferReply();
 
       const repoName = path.basename(activeRepo);
-      await interaction.editReply(`🧪 Running verification/tests for **${repoName}**...`);
+      await interaction.editReply(`🧪 Running verification/tests for **${repoName}** on your PC...`);
 
       const result = await taskRunner.runVerification(activeRepo);
 
@@ -175,7 +189,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
 
       if (taskRunner.isRunning(contextId)) {
         await interaction.reply({
-          content: '⚠️ A task is already running in this channel. Use `/cancel` to stop it first.',
+          content: '⚠️ A task is already running in this session. Use `/cancel` to stop it first.',
           ephemeral: true,
         });
         return;
@@ -191,25 +205,19 @@ client.on('interactionCreate', async (interaction: Interaction) => {
         .setTitle(`⚡ Agent Task Launched on [${repoName}]`)
         .setColor(0x3498db)
         .addFields(
+          { name: 'User', value: `<@${interaction.user.id}>`, inline: true },
           { name: 'Repository', value: `\`${activeRepo}\``, inline: true },
           { name: 'Model', value: `\`${model}\``, inline: true },
           { name: 'Instruction', value: `"${prompt}"` }
         )
-        .setFooter({ text: 'Executing locally on PC via OpenCode CLI...' });
+        .setFooter({ text: 'Executing locally on developer PC via OpenCode CLI...' });
 
       await interaction.editReply({ embeds: [startEmbed] });
-
-      // Execute task
-      let lastUpdateMessage = '';
-      const updateDebounced = async (outputChunk: string) => {
-        // Send status updates if long running (optional log snippet)
-      };
 
       const result = await taskRunner.executeTask(contextId, {
         repoPath: activeRepo,
         prompt,
         model,
-        onLog: updateDebounced,
       });
 
       const success = result.exitCode === 0;
@@ -222,29 +230,29 @@ client.on('interactionCreate', async (interaction: Interaction) => {
         .setTimestamp();
 
       if (interaction.channel && interaction.channel instanceof TextChannel) {
-        await interaction.channel.send({ embeds: [completionEmbed] });
+        await interaction.channel.send({ content: `<@${interaction.user.id}>`, embeds: [completionEmbed] });
       } else {
-        await interaction.followUp({ embeds: [completionEmbed] });
+        await interaction.followUp({ content: `<@${interaction.user.id}>`, embeds: [completionEmbed] });
       }
       return;
     }
   }
 
   // Handle Dropdown Menu Selection (/repo dropdown)
-  if (interaction.isStringSelectMenu() && interaction.customId === 'select_repo') {
+  if (interaction.isStringSelectMenu() && interaction.customId.startsWith('select_repo')) {
     const selectedRepoPath = interaction.values[0];
     repoManager.setActiveRepo(contextId, selectedRepoPath);
 
     const repoName = path.basename(selectedRepoPath);
-    const hasClaudeMd = require('fs').existsSync(path.join(selectedRepoPath, 'CLAUDE.md'));
+    const hasClaudeMd = fs.existsSync(path.join(selectedRepoPath, 'CLAUDE.md'));
 
     const activeEmbed = new EmbedBuilder()
-      .setTitle(`✅ Selected Repository: ${repoName}`)
+      .setTitle(`✅ Target Repository Set: ${repoName}`)
       .setColor(0x2ecc71)
       .setDescription(
         `Target directory set to:\n\`${selectedRepoPath}\`\n\n` +
-          `${hasClaudeMd ? '📄 **CLAUDE.md Detected**: OpenCode CLI will respect existing repository rules.\n\n' : ''}` +
-          `Now send commands via \`/task prompt: "..."\`.`
+          `${hasClaudeMd ? '📄 **CLAUDE.md Detected**: OpenCode CLI will respect repository guidelines.\n\n' : ''}` +
+          `Send instructions via \`/task prompt: "..."\`.`
       );
 
     await interaction.update({

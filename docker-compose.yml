@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  discord-agent-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: discord-agent-runner
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - REPOS_DIR=/workspace
+    volumes:
+      # Mount your local projects directory into the container
+      # On Windows (PowerShell): ${HOST_WORKSPACE_PATH:-C:/Users/vdkad}:/workspace
+      # On Linux/macOS: ${HOST_WORKSPACE_PATH:-$HOME}:/workspace
+      - ${HOST_WORKSPACE_PATH:-C:/Users/vdkad}:/workspace
+      # Optional: Mount OpenCode config for credentials
+      - ${HOME:-~}/.opencode:/root/.opencode:ro
