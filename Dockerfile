@@ -1,6 +1,14 @@
-FROM node:22-bookworm
+FROM node:22-bookworm AS builder
 
-# Install essential dev tools: git, curl, openjdk-21-jdk / maven, python3
+WORKDIR /app
+COPY package*.json ./
+RUN npm install
+COPY . .
+RUN npm run build
+
+FROM node:22-bookworm AS runner
+
+# Install essential dev tools: git, curl, openjdk-17-jdk, maven, python3
 RUN apt-get update && apt-get install -y \
     git \
     curl \
@@ -14,15 +22,13 @@ RUN npm install -g opencode-ai || true
 
 WORKDIR /app
 
-# Copy package descriptors & install dependencies
 COPY package*.json ./
-RUN npm ci --only=production
+RUN npm install --omit=dev
 
-# Copy application source code
-COPY . .
-RUN npm run build
+# Copy compiled JavaScript output from builder stage
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/.env* ./
 
-# Default environment variables
 ENV NODE_ENV=production
 ENV REPOS_DIR=/workspace
 
