@@ -8,17 +8,55 @@ export const slashCommands = [
 
   new SlashCommandBuilder()
     .setName('task')
-    .setDescription('Execute an AI agent task on the active repository')
+    .setDescription('Run any instruction for the AI agent (e.g. ssh somewhere, research a topic, code)')
     .addStringOption((option) =>
       option
         .setName('prompt')
-        .setDescription('Instruction for the AI agent (e.g. "Write unit tests for user service")')
+        .setDescription('Instruction for the AI agent (e.g. "ssh into prod server and check logs", "research topic X")')
         .setRequired(true)
     )
     .addStringOption((option) =>
       option
         .setName('model')
         .setDescription('AI model override (e.g. "deepseek-v4", "gemini-3.6-flash", "claude-3-7-sonnet")')
+        .setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('ticket')
+    .setDescription('Create a GitHub ticket/issue for this repository')
+    .addStringOption((option) =>
+      option
+        .setName('title')
+        .setDescription('Title of the issue or ticket')
+        .setRequired(true)
+    )
+    .addStringOption((option) =>
+      option
+        .setName('description')
+        .setDescription('Detailed description, steps, or requirements')
+        .setRequired(true)
+    )
+    .addStringOption((option) =>
+      option
+        .setName('model')
+        .setDescription('AI model override (optional)')
+        .setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('feature')
+    .setDescription('Implement a feature, create a PR, merge it, and deploy')
+    .addStringOption((option) =>
+      option
+        .setName('prompt')
+        .setDescription('Description of the feature to implement and deploy')
+        .setRequired(true)
+    )
+    .addStringOption((option) =>
+      option
+        .setName('model')
+        .setDescription('AI model override (optional)')
         .setRequired(false)
     ),
 
