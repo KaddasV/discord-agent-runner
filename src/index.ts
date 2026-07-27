@@ -4,6 +4,7 @@ import {
   ActionRowBuilder,
   StringSelectMenuBuilder,
   EmbedBuilder,
+  AttachmentBuilder,
   Interaction,
   TextChannel,
   ChannelType,
@@ -16,6 +17,7 @@ import { config } from './config';
 import { repoManager } from './repoManager';
 import { taskRunner } from './runner';
 import { registerSlashCommands } from './commands';
+import { saveTaskLog, getTaskLog } from './logStore';
 
 const client = new Client({
   intents: [
@@ -131,13 +133,28 @@ async function executeAndReportTask(task: QueuedTask, initialInteraction?: any):
     result = { exitCode: 1, output: `Exception in executeTask: ${err.message || err}` };
   } finally {
     const success = result.exitCode === 0;
-    const outputSnippet = result.output ? result.output.slice(-1800) : '(No output outputted)';
+    const fullOutputText = result.output || '(No output recorded)';
+    const outputSnippet = fullOutputText.slice(-1800);
+
+    saveTaskLog({
+      requestId,
+      prompt,
+      model,
+      repo: activeRepo,
+      exitCode: result.exitCode,
+      output: fullOutputText,
+      timestamp: new Date().toISOString(),
+    });
 
     const completionEmbed = new EmbedBuilder()
       .setTitle(success ? `✅ Task Completed [ID: ${requestId}] on [${repoName}]` : `⚠️ Task Finished [ID: ${requestId}] (Code: ${result.exitCode})`)
       .setColor(success ? 0x2ecc71 : 0xe74c3c)
-      .addFields({ name: 'Request ID', value: `\`${requestId}\``, inline: true })
-      .setDescription(`**Output Log:**\n\`\`\`\n${outputSnippet}\n\`\`\``)
+      .addFields(
+        { name: 'Request ID', value: `\`${requestId}\``, inline: true },
+        { name: 'Inspect Logs', value: `Use \`/result id:${requestId}\``, inline: true }
+      )
+      .setDescription(`**Output Log Preview:**\n\`\`\`\n${outputSnippet}\n\`\`\``)
+      .setFooter({ text: `Type /result id:${requestId} to retrieve full execution logs & details.` })
       .setTimestamp();
 
     if (initialInteraction) {
@@ -276,9 +293,10 @@ client.on('interactionCreate', async (interaction: Interaction) => {
         .addFields(
           { name: '📁 `/repo`', value: 'Select or switch target repository from dropdown menu.' },
           { name: '⚡ `/task prompt: "..." [model: "..."]`', value: 'Run OpenCode agent in selected repo (e.g. `--model opencode/deepseek-v4-flash-free`).' },
+          { name: '📜 `/result id: "..."`', value: 'Fetch full execution logs and downloadable log file for a completed task by ID.' },
           { name: '📊 `/status`', value: 'View current active repo, target user binding, and runner state.' },
           { name: '🧪 `/verify`', value: 'Run test suite (`./mvnw test` / `npm test`) on active repo.' },
-          { name: '🛑 `/cancel`', value: 'Kill currently running AI task.' }
+          { name: '🛑 `/cancel`', value: 'Kill currently running AI task and clear queue.' }
         )
         .setFooter({ text: `User Binding: ${config.myUserId || 'Shared'} | OpenCode CLI v1.18.7` });
 
@@ -383,6 +401,50 @@ client.on('interactionCreate', async (interaction: Interaction) => {
       }
 
       await interaction.reply({ content: msg });
+      return;
+    }
+
+    if (commandName === 'result') {
+      const idInput = interaction.options.getString('id', true);
+      const logData = getTaskLog(idInput);
+
+      if (!logData) {
+        await interaction.reply({
+          content: `❌ Could not find execution logs for Task ID \`${idInput}\`. Verify the ID is correct and that the task has completed.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      await interaction.deferReply();
+
+      const success = logData.exitCode === 0;
+      const repoName = path.basename(logData.repo || 'unknown');
+      const snippet = logData.output ? logData.output.slice(-1800) : '(No output outputted)';
+
+      const resultEmbed = new EmbedBuilder()
+        .setTitle(success ? `📜 Execution Log [ID: ${logData.requestId}] - Success` : `📜 Execution Log [ID: ${logData.requestId}] - Error (${logData.exitCode})`)
+        .setColor(success ? 0x2ecc71 : 0xe74c3c)
+        .addFields(
+          { name: 'Request ID', value: `\`${logData.requestId}\``, inline: true },
+          { name: 'Status', value: success ? '✅ Success (0)' : `❌ Failed (${logData.exitCode})`, inline: true },
+          { name: 'Repository', value: `\`${repoName}\``, inline: true },
+          { name: 'Model', value: `\`${logData.model}\``, inline: true },
+          { name: 'Timestamp', value: `\`${logData.timestamp}\``, inline: true },
+          { name: 'Prompt', value: `"${logData.prompt.length > 200 ? logData.prompt.slice(0, 200) + '...' : logData.prompt}"`, inline: false }
+        )
+        .setDescription(`**Output Log Preview:**\n\`\`\`\n${snippet}\n\`\`\``)
+        .setFooter({ text: 'Use this Request ID to inspect full execution logs anytime.' });
+
+      const replyOptions: any = { embeds: [resultEmbed] };
+
+      if (logData.output && logData.output.length > 1800) {
+        const buffer = Buffer.from(logData.output, 'utf-8');
+        const attachment = new AttachmentBuilder(buffer, { name: `${logData.requestId}.log` });
+        replyOptions.files = [attachment];
+      }
+
+      await interaction.editReply(replyOptions);
       return;
     }
 

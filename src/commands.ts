@@ -35,6 +35,16 @@ export const slashCommands = [
     .setDescription('Cancel any active running AI task on this channel'),
 
   new SlashCommandBuilder()
+    .setName('result')
+    .setDescription('Fetch execution logs and results for a completed agent task by ID')
+    .addStringOption((option) =>
+      option
+        .setName('id')
+        .setDescription('The Task ID (e.g. REQ-12345 or just 12345)')
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
     .setName('help')
     .setDescription('Show help and instructions for the Discord Agent Runner'),
 ].map((cmd) => cmd.toJSON());

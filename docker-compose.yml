@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   discord-agent-runner:
     build:
@@ -16,5 +14,7 @@ services:
       # On Windows (PowerShell): ${HOST_WORKSPACE_PATH:-C:/Users/vdkad}:/workspace
       # On Linux/macOS: ${HOST_WORKSPACE_PATH:-$HOME}:/workspace
       - ${HOST_WORKSPACE_PATH:-C:/Users/vdkad}:/workspace
+      # Persistent execution log storage on host
+      - ./task_logs:/app/task_logs
       # Optional: Mount OpenCode config for credentials
       - ${HOME:-~}/.opencode:/root/.opencode:ro
