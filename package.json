@@ -1,0 +1,29 @@
+{
+  "name": "discord-agent-runner",
+  "version": "1.0.0",
+  "description": "Decoupled Discord Bot control plane for remote OpenCode & AI agent execution on local repositories",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc"
+  },
+  "keywords": [
+    "opencode",
+    "discord-bot",
+    "ai-agent",
+    "automation",
+    "deepseek"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "discord.js": "^14.18.0",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}
