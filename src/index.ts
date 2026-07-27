@@ -189,11 +189,16 @@ async function executeAndReportTask(task: QueuedTask, initialInteraction?: any):
               { name: 'Repository', value: `\`${repoName}\``, inline: true },
               { name: 'Channel', value: `<#${channelId}>`, inline: true },
               { name: 'Model', value: `\`${model}\``, inline: true },
+              { name: 'Inspect Logs & Results', value: `Use \`/result id:${requestId}\` to download full logs & view output`, inline: false },
               { name: 'Prompt', value: `"${prompt.length > 250 ? prompt.slice(0, 250) + '...' : prompt}"`, inline: false }
             )
+            .setFooter({ text: `Type /result id:${requestId} to retrieve full execution logs & details.` })
             .setTimestamp();
 
-          await resultsChannel.send({ embeds: [statusEmbed] });
+          await resultsChannel.send({
+            content: `<@${userId}> 🔔 Your task \`${requestId}\` has finished executing! Type \`/result id:${requestId}\` to access the full logs and result details.`,
+            embeds: [statusEmbed],
+          });
           console.log(`[TaskResult] Posted completion status for ${requestId} to #${resultsChannel.name}`);
         }
       } catch (err) {
