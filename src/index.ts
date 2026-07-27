@@ -371,6 +371,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
           { name: '⚡ `/task prompt: "..."`', value: 'Run any instruction for the agent (ssh somewhere, research a topic, code).' },
           { name: '🎫 `/ticket title: "..." description: "..."`', value: 'Create a GitHub issue/ticket in this repository.' },
           { name: '🚀 `/feature prompt: "..."`', value: 'Cut branch from latest develop, implement feature, PR, merge & deploy.' },
+          { name: '📦 `/release [version] [notes]`', value: 'Inspect repo conventions, bump version, tag, and publish release.' },
           { name: '💬 `/followup id: "..." prompt: "..."`', value: 'Queue a follow-up command for a previous task result.' },
           { name: '📜 `/result id: "..."`', value: 'Fetch full execution logs and downloadable log file for a completed task by ID.' },
           { name: '📊 `/status`', value: 'View current active repo, target user binding, and runner state.' },
@@ -607,6 +608,15 @@ client.on('interactionCreate', async (interaction: Interaction) => {
       const model = interaction.options.getString('model') || config.defaultModel;
       const prompt = `Implement the following feature in this codebase autonomously:\n\n"${userPrompt}"\n\nExecute the following workflow strictly:\n1. Always fetch the latest changes from remote (git fetch origin), checkout and pull the latest 'develop' branch (or 'dev' / 'main' if develop does not exist), and cut a new git feature branch strictly from there.\n2. Write code and implement the feature, including tests.\n3. Verify that tests and build pass.\n4. Commit changes and push the feature branch to remote origin.\n5. Create a GitHub Pull Request targeting develop (using gh pr create).\n6. Merge the Pull Request (using gh pr merge).\n7. If there are deployment scripts or continuous deployment workflows, ensure the feature is deployed or trigger the deployment.\nReport the PR link, merge status, and deployment results when finished.`;
       await handleAgentCommand(interaction, contextId, prompt, model, 'Feature Implementation & Deploy');
+      return;
+    }
+
+    if (commandName === 'release') {
+      const version = interaction.options.getString('version') || 'auto (determine next logical version from repo conventions and history)';
+      const notes = interaction.options.getString('notes') || 'Generate changelog automatically from recent commits and PRs.';
+      const model = interaction.options.getString('model') || config.defaultModel;
+      const prompt = `Perform a project release for this repository autonomously.\n\nTarget Version: ${version}\nRelease Notes / Instructions: ${notes}\n\nExecute the following release workflow strictly:\n1. Inspect the repository structure, CLAUDE.md, README, package.json, pom.xml, build.gradle, or CI/CD scripts/workflows to understand how this specific repository handles versioning and releases.\n2. Ensure working directory is clean and on the appropriate release branch (e.g. main, master, or develop depending on repo convention). Pull latest changes.\n3. Bump version numbers in configuration files (e.g. package.json, pom.xml, etc.) as required by repo conventions.\n4. Generate or update changelog/release notes.\n5. Commit the version bump and create a git tag for the release (e.g. git tag -a v... -m "...").\n6. Push commits and tags to remote origin (git push origin --tags).\n7. If GitHub Releases are used, create a GitHub Release using the GitHub CLI (gh release create) with the generated release notes.\n8. Trigger or verify any build, publishing, or deployment pipelines associated with releases in this repository.\nReport the released version, tag URL, GitHub release link, and publishing status when finished.`;
+      await handleAgentCommand(interaction, contextId, prompt, model, 'Project Release');
       return;
     }
   }

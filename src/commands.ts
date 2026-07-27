@@ -61,6 +61,28 @@ export const slashCommands = [
     ),
 
   new SlashCommandBuilder()
+    .setName('release')
+    .setDescription('Inspect repo release conventions, bump version, tag, and publish release')
+    .addStringOption((option) =>
+      option
+        .setName('version')
+        .setDescription('Target version (e.g. v1.2.0, patch, minor, major, or auto)')
+        .setRequired(false)
+    )
+    .addStringOption((option) =>
+      option
+        .setName('notes')
+        .setDescription('Release notes or changelog instructions (optional)')
+        .setRequired(false)
+    )
+    .addStringOption((option) =>
+      option
+        .setName('model')
+        .setDescription('AI model override (optional)')
+        .setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
     .setName('status')
     .setDescription('Check current active repository and agent runner status'),
 
