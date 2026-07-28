@@ -99,6 +99,10 @@ export const slashCommands = [
     ),
 
   new SlashCommandBuilder()
+    .setName('removechannel')
+    .setDescription('Permanently delete this repo channel and block it from being auto-recreated'),
+
+  new SlashCommandBuilder()
     .setName('status')
     .setDescription('Check current active repository and agent runner status'),
 
