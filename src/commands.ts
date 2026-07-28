@@ -99,6 +99,22 @@ export const slashCommands = [
     ),
 
   new SlashCommandBuilder()
+    .setName('issues')
+    .setDescription('List open GitHub issues for this repository with summaries and tags')
+    .addStringOption((option) =>
+      option
+        .setName('labels')
+        .setDescription('Comma-separated labels to filter issues by (optional)')
+        .setRequired(false)
+    )
+    .addIntegerOption((option) =>
+      option
+        .setName('limit')
+        .setDescription('Max number of issues to show (default 10, max 25)')
+        .setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
     .setName('removechannel')
     .setDescription('Permanently delete this repo channel and block it from being auto-recreated'),
 

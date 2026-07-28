@@ -27,9 +27,57 @@ import { registerSlashCommands } from './commands';
 import { saveTaskLog, getTaskLog } from './logStore';
 import { registerChannelRepo, getMappingForChannel, removeChannelMapping } from './channelRepoMap';
 import { isRepoVisible, setRepoVisible, isRepoRemoved, setRepoRemoved, getRemovedRepoPaths } from './repoPrefs';
+import { listOpenIssues, GhIssue } from './github';
 
 function cleanPromptInput(text: string): string {
   return text.trim().replace(/^["']+|["']+$/g, '').trim();
+}
+
+function summarizeIssueBody(body: string): string {
+  const stripped = (body || '')
+    .replace(/```[\s\S]*?```/g, '')
+    .replace(/[#*_>`]/g, '')
+    .replace(/\r?\n+/g, ' ')
+    .trim();
+  if (!stripped) return '*No description provided.*';
+  return stripped.length > 220 ? `${stripped.slice(0, 220).trim()}...` : stripped;
+}
+
+const ISSUES_PER_EMBED = 8;
+
+function buildIssuesEmbeds(repoName: string, issues: GhIssue[]) {
+  const chunks: GhIssue[][] = [];
+  for (let i = 0; i < issues.length; i += ISSUES_PER_EMBED) {
+    chunks.push(issues.slice(i, i + ISSUES_PER_EMBED));
+  }
+
+  return chunks.map((chunk, chunkIndex) => {
+    const embed = new EmbedBuilder().setColor(0x8e5cff);
+
+    if (chunkIndex === 0) {
+      embed
+        .setTitle(`🎫 Open GitHub Issues — ${repoName}`)
+        .setDescription(`Showing \`${issues.length}\` open issue(s).`);
+    }
+
+    for (const issue of chunk) {
+      const tags = issue.labels && issue.labels.length > 0
+        ? issue.labels.map((l) => `\`${l.name}\``).join(' ')
+        : '_no labels_';
+      const summary = summarizeIssueBody(issue.body);
+      const fieldValue = `${tags}\n${summary}\n[View on GitHub ↗](${issue.url})`.slice(0, 1024);
+      embed.addFields({
+        name: `#${issue.number} ${issue.title}`.slice(0, 256),
+        value: fieldValue,
+      });
+    }
+
+    if (chunkIndex === chunks.length - 1) {
+      embed.setFooter({ text: `Use /task or /followup referencing an issue number to start work on it.` });
+    }
+
+    return embed;
+  });
 }
 
 const client = new Client({
@@ -519,6 +567,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
           { name: '🗑️ `/removechannel`', value: 'Run inside a repo channel to permanently delete it and block it from being auto-recreated.' },
           { name: '⚡ `/task prompt: ...`', value: 'Run any instruction for the agent without quotes (ssh somewhere, research a topic, code).' },
           { name: '🎫 `/ticket title: ... description: ...`', value: 'Create a GitHub issue/ticket in this repository without quotes.' },
+          { name: '📋 `/issues [labels] [limit]`', value: 'List open GitHub issues for this repository with summaries and tags.' },
           { name: '🚀 `/feature prompt: ...`', value: 'Cut feature branch from dev, implement feature, and open a separate GitHub PR.' },
           { name: '🔧 `/fix prompt: ...`', value: 'Cut bug fix branch from dev, implement bug fix, and open a separate GitHub PR.' },
           { name: '📦 `/release [version] [notes]`', value: 'Inspect repo conventions, bump version, tag, and publish release.' },
@@ -820,6 +869,43 @@ client.on('interactionCreate', async (interaction: Interaction) => {
         .setDescription(`**Repository**: \`${repoName}\`\n\n\`\`\`\n${result.output.slice(-1800)}\n\`\`\``);
 
       await interaction.editReply({ content: '', embeds: [verifyEmbed] });
+      return;
+    }
+
+    if (commandName === 'issues') {
+      let activeRepo = interaction.channelId ? repoManager.getRepoForChannel(interaction.channelId) : null;
+      if (!activeRepo) {
+        await interaction.reply({
+          content: '❌ No repository associated with this channel! Please run `/issues` inside your `#repo-...` channel.',
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const labels = cleanPromptInput(interaction.options.getString('labels') || '');
+      const limit = interaction.options.getInteger('limit') || 10;
+
+      await interaction.deferReply();
+
+      const repoName = path.basename(activeRepo);
+      const result = await listOpenIssues(activeRepo, { labels: labels || undefined, limit });
+
+      if (!result.success) {
+        await interaction.editReply({
+          content: `❌ Failed to fetch GitHub issues for **${repoName}**: \`${result.error || 'Unknown error'}\`\n\nMake sure this repo has a GitHub remote and \`gh\` is authenticated (\`GH_TOKEN\`/\`GITHUB_TOKEN\`).`,
+        });
+        return;
+      }
+
+      if (result.issues.length === 0) {
+        await interaction.editReply({
+          content: `✅ No open issues found for **${repoName}**${labels ? ` with label(s) \`${labels}\`` : ''}.`,
+        });
+        return;
+      }
+
+      const embeds = buildIssuesEmbeds(repoName, result.issues);
+      await interaction.editReply({ embeds });
       return;
     }
 
