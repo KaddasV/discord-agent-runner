@@ -1,9 +1,7 @@
-# Brainstorm: merging `discord-agent-runner` + `project-genesis`
+# Architectural Blueprint & Product Roadmap: Merging `discord-agent-runner` + `project-genesis`
 
-Status: **idea capture, not a plan.** Nothing here is committed to. Written after reading both
-repos in full (this repo's `src/`, and `project-genesis`'s `skills/`, `rules/`, `decisions/`,
-`deploy/`, `ci/`, `templates/`, `install.sh`/`.ps1`). Cross-references below point at real files
-as of 2026-07-28, not aspirational ones.
+Status: **APPROVED ARCHITECTURAL DECISION & PRODUCT ROADMAP** (Finalized 2026-07-28).
+This document captures the confirmed product architecture, technical requirements, and phased roadmap for building the "AI Dev Agency in Discord".
 
 ## 1. The vision, restated
 
@@ -318,4 +316,67 @@ Following evaluation of Option A, five hard technical requirements were finalize
 * **Integration Pack SDK**: Expose a standardized schema (`manifest.json`) for community-built integration packs (e.g., Auth0, Supabase, Twilio, Redis).
 * **Quality Gates & PR Bot**: Integrated CI verification where agents cannot merge PRs unless `npm run build` and unit tests pass, reporting status back to Discord channels.
 * **Auditability & Traceability**: The Requirement Traceability Matrix ensures stakeholders can track ROI and feature progress directly from their phone.
+
+---
+
+## 15. Final Approved Roadmap & Execution Phases
+
+This section outlines the official, step-by-step roadmap for implementing the approved Modular Micro-Kernel Architecture:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│ PHASE 1: Decoupled Core Kernel & Module Separation                       │
+│ - Isolate Transport Layer (Discord) from Execution Engine (Runner API)  │
+│ - Structure `bot/`, `kit/`, `integrations/`, and `core/` modules        │
+└────────────────────────────────────┬────────────────────────────────────┘
+                                     │
+                                     ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│ PHASE 2: High-Tier Interview Engine (Option A UI)                        │
+│ - Implement `/newproject` powered by a High-Capability LLM (Pro tier)   │
+│ - Drive step-by-step interview via Discord Modals/Menus                 │
+│ - Output `docs/requirements.md` & execute `generate-project`             │
+└────────────────────────────────────┬────────────────────────────────────┘
+                                     │
+                                     ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│ PHASE 3: Issue Generator & Multi-Tier Agent Dispatcher                   │
+│ - Auto-generate GitHub Issues tagged with `agent:low-tier` / `agent:high`│
+│ - Publish Business-to-Ticket Traceability Matrix (`docs/matrix.md`)     │
+│ - Dispatch Flash/Lite agents for `tier:low` and Pro agents for `tier:high│
+└────────────────────────────────────┬────────────────────────────────────┘
+                                     │
+                                     ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│ PHASE 4: Interactive One-by-One Secret Provisioning                     │
+│ - Sequential modal prompting for keys (Stripe, SendGrid, DB URLs)       │
+│ - Auto fan-out to local `.env` and GitHub Repository Secrets            │
+│ - Zero secret leakage into channel history or logs                      │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Detailed Phase Deliverables
+
+1. **Phase 1: Architecture Modularization**
+   * Refactor internal modules to separate the Discord client interface from task execution and repository management logic.
+   * Establish clear contract interfaces for client adapters (Discord/Slack/CLI) and generator plugins.
+
+2. **Phase 2: High-Tier Interviewer & Spec Engine**
+   * Build the `/newproject` command handler in Discord.
+   * Integrate the high-capability LLM to drive interactive modal flows asking domain-specific questions.
+   * Write compiled outputs to `docs/requirements.md` and queue the initial repository generator process.
+
+3. **Phase 3: Multi-Tier Issue Breakdown & Requirement Traceability Matrix**
+   * Add automated requirement decomposition parsing `docs/requirements.md` into structured GitHub Issues.
+   * Tag issues with `agent:low-tier` (simple tasks for fast/cheaper models) and `agent:high-tier` (complex architecture for reasoning models).
+   * Generate `docs/requirements-matrix.md` and render a Discord embed summary mapping Business Requirements ➔ GitHub Issues ➔ Agent Tiers.
+
+4. **Phase 4: Sequential Modal Secret Provisioning**
+   * Implement step-by-step secret collection via `/secrets set` and `/integrations add`.
+   * Securely store values directly into `.env` and GitHub Repo Secrets via the GitHub CLI without logging or displaying secret text.
+
+5. **Phase 5: Commercialization & Integration SDK**
+   * Publish the `manifest.json` integration pack SDK.
+   * Add support for automated pull request quality gates and status reporting back to Discord channels.
+
 
