@@ -25,7 +25,8 @@ import { repoManager } from './repoManager';
 import { taskRunner, cleanOpencodeOutput } from './runner';
 import { registerSlashCommands } from './commands';
 import { saveTaskLog, getTaskLog } from './logStore';
-import { registerChannelRepo } from './channelRepoMap';
+import { registerChannelRepo, getMappingForChannel, removeChannelMapping } from './channelRepoMap';
+import { isRepoVisible, setRepoVisible, isRepoRemoved, setRepoRemoved, getRemovedRepoPaths } from './repoPrefs';
 
 function cleanPromptInput(text: string): string {
   return text.trim().replace(/^["']+|["']+$/g, '').trim();
@@ -104,6 +105,9 @@ async function ensureUserRepoChannels(guild: Guild, userId?: string, visibleRepo
       }
 
       for (const repo of repos) {
+        // Permanently removed channels must never be auto-recreated, on startup or otherwise.
+        if (isRepoRemoved(uId, repo.path)) continue;
+
         const cleanRepoName = repo.name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '');
         const channelName = `repo-${cleanRepoName}-${cleanUsername}`.slice(0, 100);
 
@@ -111,7 +115,16 @@ async function ensureUserRepoChannels(guild: Guild, userId?: string, visibleRepo
           (c) => c && c.type === ChannelType.GuildText && (c.name === channelName || (c.topic && c.topic.includes(repo.path) && c.topic.includes(uId)))
         ) as TextChannel | undefined;
 
-        const isVisible = !visibleRepos || visibleRepos.includes(repo.path) || visibleRepos.includes(repo.name);
+        // When an explicit selection is given (e.g. from the /repo dropdown), persist it as the
+        // new preference. Otherwise (e.g. on bot startup) fall back to the previously persisted
+        // preference instead of defaulting everything back to visible.
+        let isVisible: boolean;
+        if (visibleRepos) {
+          isVisible = visibleRepos.includes(repo.path) || visibleRepos.includes(repo.name);
+          setRepoVisible(uId, repo.path, isVisible);
+        } else {
+          isVisible = isRepoVisible(uId, repo.path);
+        }
 
         if (!ch) {
           if (isVisible) {
@@ -488,7 +501,8 @@ client.on('interactionCreate', async (interaction: Interaction) => {
         .setColor(0x5865f2)
         .setDescription('Control your PC\'s AI coding agents remotely from Discord!')
         .addFields(
-          { name: '📁 `/repo`', value: 'Select or switch target repository from dropdown menu.' },
+          { name: '📁 `/repo`', value: 'Select or switch target repository from dropdown menu; also restores permanently removed channels.' },
+          { name: '🗑️ `/removechannel`', value: 'Run inside a repo channel to permanently delete it and block it from being auto-recreated.' },
           { name: '⚡ `/task prompt: ...`', value: 'Run any instruction for the agent without quotes (ssh somewhere, research a topic, code).' },
           { name: '🎫 `/ticket title: ... description: ...`', value: 'Create a GitHub issue/ticket in this repository without quotes.' },
           { name: '🚀 `/feature prompt: ...`', value: 'Cut feature branch from dev, implement feature, and open a separate GitHub PR.' },
@@ -524,7 +538,11 @@ client.on('interactionCreate', async (interaction: Interaction) => {
         const channels = interaction.guild ? await interaction.guild.channels.fetch() : null;
         const cleanUsername = interaction.user.username.toLowerCase().replace(/[^a-z0-9]/g, '');
 
-        const options = repos.map((r) => {
+        const removedPaths = getRemovedRepoPaths(interaction.user.id);
+        const activeRepos = repos.filter((r) => !removedPaths.includes(r.path));
+        const removedRepos = repos.filter((r) => removedPaths.includes(r.path));
+
+        const options = activeRepos.map((r) => {
           const desc = `${r.hasClaudeMd ? '📄 CLAUDE.md | ' : ''}${r.path}`;
           const cleanRepoName = r.name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '');
           const channelName = `repo-${cleanRepoName}-${cleanUsername}`.slice(0, 100);
@@ -544,26 +562,49 @@ client.on('interactionCreate', async (interaction: Interaction) => {
           };
         });
 
-        const selectMenu = new StringSelectMenuBuilder()
-          .setCustomId(`select_repo_${interaction.user.id}`)
-          .setPlaceholder('📁 Select repository channels to SHOW in your sidebar...')
-          .setMinValues(0)
-          .setMaxValues(Math.min(options.length, 25))
-          .addOptions(options.slice(0, 25));
+        const components: ActionRowBuilder<StringSelectMenuBuilder>[] = [];
 
-        const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(selectMenu);
+        if (options.length > 0) {
+          const selectMenu = new StringSelectMenuBuilder()
+            .setCustomId(`select_repo_${interaction.user.id}`)
+            .setPlaceholder('📁 Select repository channels to SHOW in your sidebar...')
+            .setMinValues(0)
+            .setMaxValues(Math.min(options.length, 25))
+            .addOptions(options.slice(0, 25));
+          components.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(selectMenu));
+        }
+
+        if (removedRepos.length > 0) {
+          const restoreMenu = new StringSelectMenuBuilder()
+            .setCustomId(`restore_repo_${interaction.user.id}`)
+            .setPlaceholder('♻️ Restore permanently removed repo channels...')
+            .setMinValues(0)
+            .setMaxValues(Math.min(removedRepos.length, 25))
+            .addOptions(
+              removedRepos.slice(0, 25).map((r) => ({
+                label: r.name.slice(0, 100),
+                description: r.path.slice(0, 100),
+                value: r.name.slice(0, 100),
+              }))
+            );
+          components.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(restoreMenu));
+        }
 
         const repoEmbed = new EmbedBuilder()
           .setTitle('📂 Repository Channel Manager')
           .setColor(0x00ffaa)
           .setDescription(
             `Each repository gets a dedicated, private text channel (\`#repo-<name>-...\`).\n\n` +
-            `Use the dropdown menu below to select which repository channels you want **visible** in your Discord sidebar. Any unselected repositories will be hidden from your view (message history is preserved).`
+            `Use the dropdown menu below to select which repository channels you want **visible** in your Discord sidebar. Any unselected repositories will be hidden from your view (message history is preserved).\n\n` +
+            `To permanently delete a channel and stop it from ever being auto-recreated, run \`/removechannel\` inside that channel.` +
+            (removedRepos.length > 0
+              ? `\n\n♻️ You have \`${removedRepos.length}\` permanently removed repo channel(s): ${removedRepos.map((r) => `\`${r.name}\``).join(', ')}. Use the second dropdown below to restore them.`
+              : '')
           );
 
         await interaction.reply({
           embeds: [repoEmbed],
-          components: [row],
+          components,
           ephemeral: true,
         });
         console.log(`[Command /repo] Successfully displayed repository channel manager.`);
@@ -576,6 +617,46 @@ client.on('interactionCreate', async (interaction: Interaction) => {
           }).catch(() => {});
         }
       }
+      return;
+    }
+
+    if (commandName === 'removechannel') {
+      const mapping = getMappingForChannel(interaction.channelId);
+      if (!mapping) {
+        await interaction.reply({
+          content: `⚠️ This channel isn't a tracked repository channel, so it can't be removed this way.`,
+          ephemeral: true,
+        });
+        return;
+      }
+      if (mapping.userId !== interaction.user.id) {
+        await interaction.reply({
+          content: `⚠️ Only <@${mapping.userId}>, the owner of this repo channel, can remove it.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const confirmRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`confirm_removechannel_${interaction.channelId}`)
+          .setLabel('🗑️ Permanently Remove')
+          .setStyle(ButtonStyle.Danger),
+        new ButtonBuilder()
+          .setCustomId(`cancel_removechannel_${interaction.channelId}`)
+          .setLabel('Cancel')
+          .setStyle(ButtonStyle.Secondary)
+      );
+
+      const warnEmbed = new EmbedBuilder()
+        .setTitle('⚠️ Permanently Remove This Channel?')
+        .setColor(0xe74c3c)
+        .setDescription(
+          `This will **delete** \`#${mapping.channelName}\` (mapped to repo \`${mapping.repoPath}\`) and permanently block it from ever being auto-recreated.\n\n` +
+            `You can bring it back later via \`/repo\` → **Restore permanently removed repo channels**.`
+        );
+
+      await interaction.reply({ embeds: [warnEmbed], components: [confirmRow], ephemeral: true });
       return;
     }
 
@@ -817,6 +898,78 @@ client.on('interactionCreate', async (interaction: Interaction) => {
         }).catch(() => {});
       }
     }
+    return;
+  }
+
+  if (interaction.isStringSelectMenu() && interaction.customId.startsWith('restore_repo_')) {
+    console.log(`[SelectMenu] Received restore selection from ${interaction.user.username}:`, interaction.values);
+    try {
+      if (!interaction.guild) {
+        await interaction.update({
+          content: `⚠️ Repository channel management is only available within a Discord server (guild).`,
+          embeds: [],
+          components: [],
+        });
+        return;
+      }
+
+      const selectedNames = interaction.values;
+      const repos = repoManager.discoverRepositories();
+      for (const repo of repos) {
+        if (selectedNames.includes(repo.name)) {
+          setRepoRemoved(interaction.user.id, repo.path, false);
+        }
+      }
+      await ensureUserRepoChannels(interaction.guild, interaction.user.id);
+
+      const restoredEmbed = new EmbedBuilder()
+        .setTitle(`♻️ Repository Channels Restored`)
+        .setColor(0x2ecc71)
+        .setDescription(
+          `Restored \`${selectedNames.length}\` repo channel(s): ${selectedNames.map((n) => `\`${n}\``).join(', ') || 'none'}.\n\n` +
+            `They will reappear as visible channels in your sidebar.`
+        );
+
+      await interaction.update({
+        embeds: [restoredEmbed],
+        components: [],
+      });
+      console.log(`[SelectMenu] Restored repo channels for user ${interaction.user.id}:`, selectedNames);
+    } catch (err: any) {
+      console.error(`[SelectMenu Error] Failed to handle restore selection:`, err);
+      if (interaction.isRepliable()) {
+        await interaction.reply({
+          content: `❌ Error restoring repository channels: \`${err.message || err}\``,
+          ephemeral: true,
+        }).catch(() => {});
+      }
+    }
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId.startsWith('confirm_removechannel_')) {
+    const targetChannelId = interaction.customId.replace('confirm_removechannel_', '');
+    const mapping = getMappingForChannel(targetChannelId);
+    if (!mapping) {
+      await interaction.update({ content: `⚠️ Channel mapping no longer found; nothing to remove.`, embeds: [], components: [] }).catch(() => {});
+      return;
+    }
+
+    setRepoRemoved(mapping.userId, mapping.repoPath, true);
+    removeChannelMapping(targetChannelId);
+    await interaction.update({ content: `✅ Permanently removing \`#${mapping.channelName}\`...`, embeds: [], components: [] }).catch(() => {});
+
+    try {
+      const channel = await client.channels.fetch(targetChannelId).catch(() => null) as TextChannel | null;
+      if (channel) await channel.delete('Permanently removed via /removechannel');
+    } catch (err) {
+      console.error(`[RemoveChannel] Failed to delete channel ${targetChannelId}:`, err);
+    }
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId.startsWith('cancel_removechannel_')) {
+    await interaction.update({ content: `❎ Cancelled. Channel was not removed.`, embeds: [], components: [] }).catch(() => {});
     return;
   }
 

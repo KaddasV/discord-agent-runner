@@ -110,6 +110,15 @@ export function getAllMappings(): ChannelRepoMapping {
 }
 
 /**
+ * Look up the full mapping entry for a given channel ID (repo path/name, owning user, etc).
+ * Returns null if no mapping exists.
+ */
+export function getMappingForChannel(channelId: string): ChannelRepoMapping[string] | null {
+  const map = loadMap();
+  return map[channelId] || null;
+}
+
+/**
  * Force reload from disk (useful after external edits).
  */
 export function reloadMap(): void {
