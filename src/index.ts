@@ -16,6 +16,7 @@ import {
   CategoryChannel,
   Guild,
   Message,
+  PermissionFlagsBits,
 } from 'discord.js';
 import path from 'path';
 import fs from 'fs';
@@ -25,8 +26,7 @@ import { taskRunner, cleanOpencodeOutput } from './runner';
 import { registerSlashCommands } from './commands';
 import { saveTaskLog, getTaskLog } from './logStore';
 
-function cleanPromptInput(text?: string | null): string {
-  if (!text) return '';
+function cleanPromptInput(text: string): string {
   return text.trim().replace(/^["']+|["']+$/g, '').trim();
 }
 
@@ -48,31 +48,114 @@ function isInteractionForThisInstance(userId: string): boolean {
   return true;
 }
 
-async function getOrCreateResultsChannel(guild: Guild): Promise<TextChannel | null> {
+async function getOrCreateReleaseChannel(guild: Guild): Promise<TextChannel | null> {
   try {
     const channels = await guild.channels.fetch();
     let category = channels.find(
       (c) => c && c.type === ChannelType.GuildCategory && c.name.toLowerCase().includes('agent')
     ) as CategoryChannel | undefined;
 
-    const resultsChannelName = 'agent-results';
-    let resultsChannel = channels.find(
-      (c) => c && c.type === ChannelType.GuildText && c.name === resultsChannelName
+    const releaseChannelName = 'agent-releases';
+    let releaseChannel = channels.find(
+      (c) => c && c.type === ChannelType.GuildText && c.name === releaseChannelName
     ) as TextChannel | undefined;
 
-    if (!resultsChannel) {
-      resultsChannel = await guild.channels.create({
-        name: resultsChannelName,
+    if (!releaseChannel) {
+      releaseChannel = await guild.channels.create({
+        name: releaseChannelName,
         type: ChannelType.GuildText,
         parent: category?.id,
-        topic: '📊 Task Execution Results & Status Notifications (Whether prompts finished or not)',
+        topic: '🚀 Central Application Redeployments & Release Announcements (All users tagged)',
       });
-      console.log(`✅ Auto-created results channel '#${resultsChannelName}' in '${guild.name}'`);
+      console.log(`✅ Auto-created release channel '#${releaseChannelName}' in '${guild.name}'`);
     }
-    return resultsChannel || null;
+    return releaseChannel || null;
   } catch (err) {
-    console.warn(`Failed to get/create results channel in '${guild?.name}':`, err);
+    console.warn(`Failed to get/create release channel in '${guild?.name}':`, err);
     return null;
+  }
+}
+
+async function ensureUserRepoChannels(guild: Guild, userId?: string, visibleRepos?: string[]) {
+  try {
+    const repos = repoManager.discoverRepositories();
+    const channels = await guild.channels.fetch();
+    let category = channels.find(
+      (c) => c && c.type === ChannelType.GuildCategory && c.name.toLowerCase().includes('agent')
+    ) as CategoryChannel | undefined;
+
+    const targetUserIds: string[] = [];
+    if (userId) {
+      targetUserIds.push(userId);
+    } else if (config.myUserId) {
+      targetUserIds.push(config.myUserId);
+    } else if (config.allowedUserIds.length > 0) {
+      targetUserIds.push(...config.allowedUserIds);
+    }
+
+    for (const uId of targetUserIds) {
+      let cleanUsername = 'user';
+      try {
+        const u = await client.users.fetch(uId);
+        cleanUsername = u.username.toLowerCase().replace(/[^a-z0-9]/g, '');
+      } catch (e) {
+        // ignore
+      }
+
+      for (const repo of repos) {
+        const cleanRepoName = repo.name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '');
+        const channelName = `repo-${cleanRepoName}-${cleanUsername}`.slice(0, 100);
+
+        let ch = channels.find(
+          (c) => c && c.type === ChannelType.GuildText && (c.name === channelName || (c.topic && c.topic.includes(repo.path) && c.topic.includes(uId)))
+        ) as TextChannel | undefined;
+
+        const isVisible = !visibleRepos || visibleRepos.includes(repo.path) || visibleRepos.includes(repo.name);
+
+        if (!ch) {
+          if (isVisible) {
+            try {
+              ch = await guild.channels.create({
+                name: channelName,
+                type: ChannelType.GuildText,
+                parent: category?.id,
+                topic: `📂 Repository: ${repo.name} | Path: ${repo.path} | User: ${uId}`,
+                permissionOverwrites: [
+                  {
+                    id: guild.id,
+                    deny: [PermissionFlagsBits.ViewChannel],
+                  },
+                  {
+                    id: uId,
+                    allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory],
+                  },
+                  {
+                    id: client.user!.id,
+                    allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory],
+                  },
+                ],
+              });
+              console.log(`✅ Auto-created private repo channel '#${channelName}' for user ${uId}`);
+            } catch (err) {
+              console.warn(`Failed to create repo channel '#${channelName}':`, err);
+            }
+          }
+        } else {
+          try {
+            await ch.permissionOverwrites.edit(uId, {
+              ViewChannel: isVisible,
+              SendMessages: isVisible,
+              ReadMessageHistory: isVisible,
+            });
+            console.log(`✅ Updated visibility for repo channel '#${ch.name}' to ${isVisible} for user ${uId}`);
+          } catch (err) {
+            console.warn(`Failed to update permissions on '${ch.name}':`, err);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('Error in ensureUserRepoChannels:', err);
   }
 }
 
@@ -204,14 +287,14 @@ async function executeAndReportTask(task: QueuedTask, initialInteraction?: any):
         .setStyle(ButtonStyle.Secondary)
     );
 
-    let redeployAnnouncement = '';
     const isRunnerApp = repoName.toLowerCase().includes('discord-agent-runner');
     const isDeployOrUpdate = /deploy|redeploy|release|docker|push|build|restart|update|pr|merge/i.test(prompt) || /deploy|redeploy|release|docker|push|build|restart|update/i.test(fullOutputText);
 
-    if (isRunnerApp && success && isDeployOrUpdate) {
+    if (isRunnerApp && success && isDeployOrUpdate && guild) {
       try {
-        let userTags = '@here @everyone';
-        if (guild) {
+        const releaseChannel = await getOrCreateReleaseChannel(guild);
+        if (releaseChannel) {
+          let userTags = '@here @everyone';
           try {
             const members = await guild.members.fetch();
             const nonBotMembers = members.filter((m) => !m.user.bot);
@@ -221,61 +304,37 @@ async function executeAndReportTask(task: QueuedTask, initialInteraction?: any):
           } catch (intentErr) {
             userTags = '@here @everyone';
           }
+          await releaseChannel.send({
+            content: `🚨 **APPLICATION REDEPLOYMENT / RELEASE** (${userTags}):\nThe \`discord-agent-runner\` app has just been modified and redeployed! Please pull the latest version and restart your app/container instance (e.g. \`git pull && docker compose up -d --build --force-recreate\`).`,
+            embeds: [completionEmbed],
+          });
         }
-        redeployAnnouncement = `\n\n🚨 **ATTENTION ALL USERS** (${userTags}):\nThe \`discord-agent-runner\` app has just been modified and redeployed! Please pull the latest version and spin up your app/container instance (e.g. \`git pull && docker-compose up -d --build --force-recreate\`).`;
       } catch (e) {
-        // If that's not possible, skip it
-        console.log('[Redeploy Notice] Skipped tagging all users:', e);
+        console.log('[Redeploy Notice] Skipped posting to release channel:', e);
       }
+    }
+
+    const replyPayload: any = { content: `<@${userId}> 🔔 Task \`${requestId}\` completed!`, embeds: [completionEmbed], components: [followUpRow] };
+    if (result.output && result.output.length > 1800) {
+      const buffer = Buffer.from(result.output, 'utf-8');
+      const attachment = new AttachmentBuilder(buffer, { name: `${requestId}.log` });
+      replyPayload.files = [attachment];
     }
 
     if (initialInteraction) {
       if (initialInteraction.channel && initialInteraction.channel instanceof TextChannel) {
-        await initialInteraction.channel.send({ content: `<@${userId}>${redeployAnnouncement}`, embeds: [completionEmbed], components: [followUpRow] }).catch(() => {});
+        await initialInteraction.channel.send(replyPayload).catch(() => {});
       } else {
-        await initialInteraction.followUp({ content: `<@${userId}>${redeployAnnouncement}`, embeds: [completionEmbed], components: [followUpRow] }).catch(() => {});
+        await initialInteraction.followUp(replyPayload).catch(() => {});
       }
     } else {
       try {
         const channel = await client.channels.fetch(channelId).catch(() => null) as TextChannel | null;
         if (channel) {
-          await channel.send({ content: `<@${userId}>${redeployAnnouncement}`, embeds: [completionEmbed], components: [followUpRow] });
+          await channel.send(replyPayload);
         }
       } catch (e) {
-        console.error(`[TaskQueue Error] Failed to send completionEmbed for ${requestId}:`, e);
-      }
-    }
-
-    if (guild) {
-      try {
-        const resultsChannel = await getOrCreateResultsChannel(guild);
-        if (resultsChannel) {
-          const statusEmbed = new EmbedBuilder()
-            .setTitle(success ? `✅ Task Execution Finished [${requestId}]` : `❌ Task Execution Failed [${requestId}]`)
-            .setColor(success ? 0x2ecc71 : 0xe74c3c)
-            .setDescription(success ? `The OpenCode prompt executed and finished successfully.` : `The OpenCode prompt failed during execution (Exit Code: ${result.exitCode}).`)
-            .addFields(
-              { name: 'Request ID', value: `\`${requestId}\``, inline: true },
-              { name: 'Status', value: success ? '✅ Finished Successfully' : `❌ Error (${result.exitCode})`, inline: true },
-              { name: 'User', value: `<@${userId}>`, inline: true },
-              { name: 'Repository', value: `\`${repoName}\``, inline: true },
-              { name: 'Channel', value: `<#${channelId}>`, inline: true },
-              { name: 'Model', value: `\`${model}\``, inline: true },
-              { name: 'Inspect Logs & Results', value: `Use \`/result id:${requestId}\` to download full logs & view output`, inline: false },
-              { name: 'Prompt', value: `"${prompt.length > 250 ? prompt.slice(0, 250) + '...' : prompt}"`, inline: false }
-            )
-            .setFooter({ text: `Type /result id:${requestId} or click below to queue a follow-up.` })
-            .setTimestamp();
-
-          await resultsChannel.send({
-            content: `<@${userId}> 🔔 Your task \`${requestId}\` has finished executing! Type \`/result id:${requestId}\` to access the full logs and result details.${redeployAnnouncement}`,
-            embeds: [statusEmbed],
-            components: [followUpRow],
-          });
-          console.log(`[TaskResult] Posted completion status for ${requestId} to #${resultsChannel.name}`);
-        }
-      } catch (err) {
-        console.error(`[TaskResult Error] Failed to send notification to results channel:`, err);
+        console.error(`[TaskQueue Error] Failed to send completionPayload for ${requestId}:`, e);
       }
     }
 
@@ -292,10 +351,15 @@ async function handleAgentCommand(
   model: string,
   commandTitle: string
 ) {
-  const activeRepo = repoManager.getActiveRepo(contextId);
+  let activeRepo = interaction.channel ? repoManager.getRepoFromChannel(interaction.channel) : null;
   if (!activeRepo) {
+    activeRepo = repoManager.getActiveRepo(contextId);
+  }
+  if (activeRepo) {
+    repoManager.setActiveRepo(contextId, activeRepo);
+  } else {
     await interaction.reply({
-      content: '❌ No repository selected! Run `/repo` first to choose a project folder.',
+      content: '❌ No repository associated with this channel! Please run commands inside your `#repo-...` channels, or use `/repo` to select visible repository channels.',
       ephemeral: true,
     });
     return;
@@ -392,8 +456,8 @@ client.once('ready', async () => {
           // Ignore missing permissions if channel creation fails
         }
       }
-
-      await getOrCreateResultsChannel(guild);
+      await ensureUserRepoChannels(guild);
+      await getOrCreateReleaseChannel(guild);
     }
   } catch (err) {
     console.warn('Channel auto-check completed.');
@@ -447,7 +511,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
     }
 
     if (commandName === 'repo') {
-      console.log(`[Command /repo] Executing for user ${interaction.user.username}`);
+      console.log(`[Command /repo] Executing channel manager for user ${interaction.user.username}`);
       try {
         const repos = repoManager.discoverRepositories();
         console.log(`[Command /repo] Found ${repos.length} repos in ${config.reposDir}`);
@@ -459,39 +523,52 @@ client.on('interactionCreate', async (interaction: Interaction) => {
           return;
         }
 
-        const activeRepo = repoManager.getActiveRepo(contextId);
+        const channels = interaction.guild ? await interaction.guild.channels.fetch() : null;
+        const cleanUsername = interaction.user.username.toLowerCase().replace(/[^a-z0-9]/g, '');
 
         const options = repos.map((r) => {
           const desc = `${r.hasClaudeMd ? '📄 CLAUDE.md | ' : ''}${r.path}`;
+          const cleanRepoName = r.name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '');
+          const channelName = `repo-${cleanRepoName}-${cleanUsername}`.slice(0, 100);
+          const ch = channels ? channels.find(c => c && c.type === ChannelType.GuildText && c.name === channelName) : null;
+          let isVisible = true;
+          if (ch && interaction.guild) {
+            const overwrite = ch.permissionOverwrites.cache.get(interaction.user.id);
+            if (overwrite && overwrite.deny.has(PermissionFlagsBits.ViewChannel)) {
+              isVisible = false;
+            }
+          }
           return {
             label: r.name.slice(0, 100),
             description: desc.slice(0, 100),
             value: r.name.slice(0, 100),
-            default: activeRepo === r.path || activeRepo === r.name,
+            default: isVisible,
           };
         });
 
         const selectMenu = new StringSelectMenuBuilder()
           .setCustomId(`select_repo_${interaction.user.id}`)
-          .setPlaceholder('📁 Choose repository to work on...')
+          .setPlaceholder('📁 Select repository channels to SHOW in your sidebar...')
+          .setMinValues(0)
+          .setMaxValues(Math.min(options.length, 25))
           .addOptions(options.slice(0, 25));
 
         const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(selectMenu);
 
         const repoEmbed = new EmbedBuilder()
-          .setTitle('📂 Repository Selector')
+          .setTitle('📂 Repository Channel Manager')
           .setColor(0x00ffaa)
           .setDescription(
-            activeRepo
-              ? `Current Active Repo: \`${path.basename(activeRepo)}\` (\`${activeRepo}\`)`
-              : 'No repository currently selected for this session.'
+            `Each repository gets a dedicated, private text channel (\`#repo-<name>-...\`).\n\n` +
+            `Use the dropdown menu below to select which repository channels you want **visible** in your Discord sidebar. Any unselected repositories will be hidden from your view (message history is preserved).`
           );
 
         await interaction.reply({
           embeds: [repoEmbed],
           components: [row],
+          ephemeral: true,
         });
-        console.log(`[Command /repo] Successfully displayed repository dropdown menu.`);
+        console.log(`[Command /repo] Successfully displayed repository channel manager.`);
       } catch (err: any) {
         console.error(`[Command /repo Error] Failed to execute /repo:`, err);
         if (interaction.isRepliable()) {
@@ -627,10 +704,15 @@ client.on('interactionCreate', async (interaction: Interaction) => {
     }
 
     if (commandName === 'verify') {
-      const activeRepo = repoManager.getActiveRepo(contextId);
+      let activeRepo = interaction.channel ? repoManager.getRepoFromChannel(interaction.channel) : null;
       if (!activeRepo) {
+        activeRepo = repoManager.getActiveRepo(contextId);
+      }
+      if (activeRepo) {
+        repoManager.setActiveRepo(contextId, activeRepo);
+      } else {
         await interaction.reply({
-          content: '❌ Please select a repository first using `/repo`.',
+          content: '❌ No repository associated with this channel! Please run verify inside your `#repo-...` channel or select one via `/repo`.',
           ephemeral: true,
         });
         return;
@@ -698,35 +780,37 @@ client.on('interactionCreate', async (interaction: Interaction) => {
   if (interaction.isStringSelectMenu() && interaction.customId.startsWith('select_repo')) {
     console.log(`[SelectMenu] Received selection from ${interaction.user.username}:`, interaction.values);
     try {
-      const selectedValue = interaction.values[0];
-      const repos = repoManager.discoverRepositories();
-      const foundRepo = repos.find((r) => r.name === selectedValue || r.path === selectedValue);
-      const selectedRepoPath = foundRepo ? foundRepo.path : selectedValue;
+      if (!interaction.guild) {
+        await interaction.update({
+          content: `⚠️ Repository channel management is only available within a Discord server (guild).`,
+          embeds: [],
+          components: [],
+        });
+        return;
+      }
 
-      repoManager.setActiveRepo(contextId, selectedRepoPath);
-
-      const repoName = path.basename(selectedRepoPath);
-      const hasClaudeMd = fs.existsSync(path.join(selectedRepoPath, 'CLAUDE.md'));
+      const selectedValues = interaction.values;
+      await ensureUserRepoChannels(interaction.guild, interaction.user.id, selectedValues);
 
       const activeEmbed = new EmbedBuilder()
-        .setTitle(`✅ Target Repository Set: ${repoName}`)
+        .setTitle(`✅ Repository Channels Updated`)
         .setColor(0x2ecc71)
         .setDescription(
-          `Target directory set to:\n\`${selectedRepoPath}\`\n\n` +
-            `${hasClaudeMd ? '📄 **CLAUDE.md Detected**: OpenCode CLI will respect repository guidelines.\n\n' : ''}` +
-            `Send instructions via \`/task prompt: "..."\`.`
+          `We have updated your visible repository channels in this server.\n\n` +
+            `Selected Repositories Visible: \`${selectedValues.length}\`\n\n` +
+            `Check your Discord sidebar for your dedicated \`#repo-...\` channels! Work related to each repo should be requested directly inside its respective channel.`
         );
 
       await interaction.update({
         embeds: [activeEmbed],
         components: [],
       });
-      console.log(`[SelectMenu] Updated active repo for context ${contextId} to: ${selectedRepoPath}`);
+      console.log(`[SelectMenu] Updated visible repo channels for user ${interaction.user.id}:`, selectedValues);
     } catch (err: any) {
       console.error(`[SelectMenu Error] Failed to handle dropdown selection:`, err);
       if (interaction.isRepliable()) {
         await interaction.reply({
-          content: `❌ Error setting repository: \`${err.message || err}\``,
+          content: `❌ Error updating repository channels: \`${err.message || err}\``,
           ephemeral: true,
         }).catch(() => {});
       }
@@ -828,11 +912,18 @@ client.on('messageCreate', async (message: Message) => {
   if (message.content.startsWith('/') || message.content.startsWith('REQ-')) return;
 
   const contextId = message.channelId || message.author.id;
-  const activeRepo = repoManager.getActiveRepo(contextId);
+  let activeRepo = message.channel ? repoManager.getRepoFromChannel(message.channel) : null;
+  if (!activeRepo) {
+    activeRepo = repoManager.getActiveRepo(contextId);
+  }
+  if (activeRepo) {
+    repoManager.setActiveRepo(contextId, activeRepo);
+  }
 
   let isAgentChannel = false;
   if (message.channel && 'name' in message.channel && typeof message.channel.name === 'string') {
-    if (message.channel.name.toLowerCase().startsWith('agent-')) {
+    const chName = message.channel.name.toLowerCase();
+    if (chName.startsWith('agent-') || chName.startsWith('repo-')) {
       isAgentChannel = true;
     }
   }

@@ -4,7 +4,7 @@ import { config } from './config';
 export const slashCommands = [
   new SlashCommandBuilder()
     .setName('repo')
-    .setDescription('Select or change the target repository for AI operations'),
+    .setDescription('Manage visible repository channels (#repo-...) in your Discord sidebar'),
 
   new SlashCommandBuilder()
     .setName('task')

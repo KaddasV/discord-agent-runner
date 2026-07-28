@@ -79,6 +79,34 @@ class RepoManager {
   public getActiveRepo(contextId: string): string | null {
     return this.activeRepoMap.get(contextId) || null;
   }
+
+  public getRepoFromChannel(channel: any): string | null {
+    if (!channel) return null;
+    const repos = this.discoverRepositories();
+
+    if (channel.topic && typeof channel.topic === 'string') {
+      const match = channel.topic.match(/Path:\s*([^\s|]+)/i) || channel.topic.match(/Repository:\s*([^\s|]+)/i);
+      if (match && match[1]) {
+        const val = match[1].trim();
+        const found = repos.find(r => r.path === val || r.name === val || r.name.toLowerCase() === val.toLowerCase());
+        if (found) return found.path;
+      }
+    }
+
+    if (channel.name && typeof channel.name === 'string') {
+      if (channel.name.startsWith('repo-')) {
+        const cleanChName = channel.name.replace(/^repo-/, '');
+        for (const r of repos) {
+          const cleanRepoName = r.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+          if (cleanChName.startsWith(cleanRepoName) || cleanChName.includes(cleanRepoName)) {
+            return r.path;
+          }
+        }
+      }
+    }
+
+    return null;
+  }
 }
 
 export const repoManager = new RepoManager();
