@@ -9,6 +9,8 @@ services:
       - .env
     environment:
       - REPOS_DIR=/workspace
+      - GH_TOKEN=${GH_TOKEN:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
     volumes:
       # Mount your local projects directory into the container
       # On Windows (PowerShell): ${HOST_WORKSPACE_PATH:-C:/Users/vdkad}:/workspace

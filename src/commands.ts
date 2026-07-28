@@ -12,13 +12,13 @@ export const slashCommands = [
     .addStringOption((option) =>
       option
         .setName('prompt')
-        .setDescription('Instruction for the AI agent (e.g. "ssh into prod server and check logs", "research topic X")')
+        .setDescription('Instruction for the AI agent (e.g. ssh into prod server and check logs, research topic X)')
         .setRequired(true)
     )
     .addStringOption((option) =>
       option
         .setName('model')
-        .setDescription('AI model override (e.g. "deepseek-v4", "gemini-3.6-flash", "claude-3-7-sonnet")')
+        .setDescription('AI model override (e.g. deepseek-v4, gemini-3.6-flash, claude-3-7-sonnet)')
         .setRequired(false)
     ),
 

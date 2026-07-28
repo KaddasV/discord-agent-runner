@@ -8,8 +8,33 @@ export interface ExecutionOptions {
   prompt: string;
   model?: string;
   agentCli?: string;
-  onLog?: (data: string) => void;
+  timeoutMs?: number;
+  onLog?: (data: string, fullOutput?: string) => void;
   onFinish?: (exitCode: number | null, outputSummary: string) => void;
+}
+
+export function cleanOpencodeOutput(output: string, cliTool: string): string {
+  if (!cliTool.includes('opencode') || !output.includes('{"type":')) {
+    return output;
+  }
+  const lines = output.split('\n');
+  let textAccumulator = '';
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    try {
+      const obj = JSON.parse(line.trim());
+      if (obj.type === 'text' && obj.part && obj.part.text) {
+        textAccumulator += obj.part.text + '\n';
+      } else if (obj.type === 'tool_use' && obj.part && obj.part.name) {
+        textAccumulator += `[Tool Use: ${obj.part.name}]\n`;
+      }
+    } catch {
+      if (!line.trim().startsWith('{')) {
+        textAccumulator += line + '\n';
+      }
+    }
+  }
+  return textAccumulator.trim() || output;
 }
 
 export class TaskRunner {
@@ -37,7 +62,7 @@ export class TaskRunner {
 
       if (!fs.existsSync(repoPath)) {
         const err = `Directory does not exist: ${repoPath}`;
-        if (options.onLog) options.onLog(err);
+        if (options.onLog) options.onLog(err, err);
         return resolve({ exitCode: 1, output: err, rawOutput: err });
       }
 
@@ -74,49 +99,49 @@ export class TaskRunner {
 
       const proc = spawn(cliTool, args, {
         cwd: repoPath,
-        shell: true,
+        shell: process.platform === 'win32',
+        stdio: ['ignore', 'pipe', 'pipe'],
         env: { ...process.env },
       });
 
       this.activeProcesses.set(contextId, proc);
 
       let fullOutput = '';
+      let timedOut = false;
+      const timeoutMs = options.timeoutMs || 15 * 60 * 1000; // Default 15 minutes
+      const timer = setTimeout(() => {
+        timedOut = true;
+        console.warn(`[TaskRunner] Task ${contextId} timed out after ${timeoutMs / 1000}s. Killing process.`);
+        try {
+          proc.kill('SIGKILL');
+        } catch (e) {
+          console.error(`[TaskRunner] Error killing timed out process:`, e);
+        }
+        this.activeProcesses.delete(contextId);
+        const errMsg = `\n[TIMEOUT] Task timed out after ${Math.round(timeoutMs / 60000)} minutes and was terminated.`;
+        fullOutput += errMsg;
+        if (options.onLog) options.onLog(errMsg, fullOutput);
+        resolve({ exitCode: 124, output: cleanOpencodeOutput(fullOutput, cliTool), rawOutput: fullOutput });
+      }, timeoutMs);
 
       proc.stdout?.on('data', (data) => {
         const str = data.toString();
         fullOutput += str;
-        if (options.onLog) options.onLog(str);
+        if (options.onLog) options.onLog(str, fullOutput);
       });
 
       proc.stderr?.on('data', (data) => {
         const str = data.toString();
         fullOutput += str;
-        if (options.onLog) options.onLog(str);
+        if (options.onLog) options.onLog(str, fullOutput);
       });
 
       proc.on('close', (code) => {
+        if (timedOut) return;
+        clearTimeout(timer);
         this.activeProcesses.delete(contextId);
 
-        // Extract clean text if json lines were received
-        let cleanedOutput = fullOutput;
-        if (cliTool.includes('opencode') && fullOutput.includes('{"type":')) {
-          const lines = fullOutput.split('\n');
-          let textAccumulator = '';
-          for (const line of lines) {
-            if (!line.trim()) continue;
-            try {
-              const obj = JSON.parse(line.trim());
-              if (obj.type === 'text' && obj.part && obj.part.text) {
-                textAccumulator += obj.part.text + '\n';
-              }
-            } catch {
-              // Ignore non-json lines
-            }
-          }
-          if (textAccumulator.trim()) {
-            cleanedOutput = textAccumulator.trim();
-          }
-        }
+        const cleanedOutput = cleanOpencodeOutput(fullOutput, cliTool);
 
         if (options.onFinish) {
           options.onFinish(code, cleanedOutput);
@@ -125,11 +150,13 @@ export class TaskRunner {
       });
 
       proc.on('error', (err) => {
+        if (timedOut) return;
+        clearTimeout(timer);
         this.activeProcesses.delete(contextId);
         const errMsg = `Failed to start process '${cliTool}': ${err.message}`;
         fullOutput += `\n${errMsg}`;
-        if (options.onLog) options.onLog(errMsg);
-        resolve({ exitCode: 1, output: fullOutput, rawOutput: fullOutput });
+        if (options.onLog) options.onLog(errMsg, fullOutput);
+        resolve({ exitCode: 1, output: cleanOpencodeOutput(fullOutput, cliTool), rawOutput: fullOutput });
       });
     });
   }
@@ -150,6 +177,7 @@ export class TaskRunner {
       const proc = spawn(command, [], {
         cwd: repoPath,
         shell: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
       });
 
       let output = '';
