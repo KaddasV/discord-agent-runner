@@ -116,7 +116,7 @@ async function executeAndReportTask(task: QueuedTask, initialInteraction?: any):
       { name: 'User', value: `<@${userId}>`, inline: true },
       { name: 'Repository', value: `\`${activeRepo}\``, inline: true },
       { name: 'Model', value: `\`${model}\``, inline: true },
-      { name: 'Instruction', value: `"${prompt}"` }
+      { name: 'Instruction', value: `"${prompt.length > 500 ? prompt.slice(0, 500) + '...' : prompt}"` }
     )
     .setFooter({ text: 'Executing locally on developer PC via OpenCode CLI...' });
 
