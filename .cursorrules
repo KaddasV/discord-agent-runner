@@ -36,7 +36,7 @@ When tasked with implementing a feature or fix in this repository, you must stri
    ```bash
    gh pr create --base dev --head <branch-name> --title "<type>: <title>" --body "### Summary of Changes\n- <details>\n\n### Verification\n- Verified via npm run build"
    ```
-7. **Report**: Output the exact URL of the created GitHub Pull Request in your response so the user can review and merge it. DO NOT auto-merge the Pull Request unless explicitly instructed to do so by the user in their prompt.
+7. **Merge & Report**: Create a separate GitHub Pull Request for history and auditability, and then automatically merge it into `dev` on your own (e.g. using `gh pr merge --auto --merge` or `gh pr merge --merge`). After merging, report the PR URL and merge status, and ensure the latest version of the application is running (e.g., via `docker compose up -d --build`).
 
 ## Project Architecture & Commands
 - **Language/Stack**: TypeScript, Node.js, Discord.js v14, OpenCode CLI, Docker / Docker Compose.

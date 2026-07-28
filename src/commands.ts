@@ -46,7 +46,7 @@ export const slashCommands = [
 
   new SlashCommandBuilder()
     .setName('feature')
-    .setDescription('Cut feature branch from dev, implement feature, and open a separate GitHub PR')
+    .setDescription('Cut feature branch from dev, implement feature, open PR, auto-merge & deploy')
     .addStringOption((option) =>
       option
         .setName('prompt')
@@ -62,7 +62,7 @@ export const slashCommands = [
 
   new SlashCommandBuilder()
     .setName('fix')
-    .setDescription('Cut bug fix branch from dev, implement bug fix, and open a separate GitHub PR')
+    .setDescription('Cut bug fix branch from dev, implement bug fix, open PR, auto-merge & deploy')
     .addStringOption((option) =>
       option
         .setName('prompt')
