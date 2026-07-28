@@ -25,8 +25,6 @@ export function cleanOpencodeOutput(output: string, cliTool: string): string {
       const obj = JSON.parse(line.trim());
       if (obj.type === 'text' && obj.part && obj.part.text) {
         textAccumulator += obj.part.text + '\n';
-      } else if (obj.type === 'tool_use' && obj.part && obj.part.name) {
-        textAccumulator += `[Tool Use: ${obj.part.name}]\n`;
       }
     } catch {
       if (!line.trim().startsWith('{')) {
@@ -123,21 +121,25 @@ export class TaskRunner {
 
       let fullOutput = '';
       let timedOut = false;
-      const timeoutMs = options.timeoutMs || 15 * 60 * 1000; // Default 15 minutes
-      const timer = setTimeout(() => {
-        timedOut = true;
-        console.warn(`[TaskRunner] Task ${contextId} timed out after ${timeoutMs / 1000}s. Killing process.`);
-        try {
-          proc.kill('SIGKILL');
-        } catch (e) {
-          console.error(`[TaskRunner] Error killing timed out process:`, e);
-        }
-        this.activeProcesses.delete(contextId);
-        const errMsg = `\n[TIMEOUT] Task timed out after ${Math.round(timeoutMs / 60000)} minutes and was terminated.`;
-        fullOutput += errMsg;
-        if (options.onLog) options.onLog(errMsg, fullOutput);
-        resolve({ exitCode: 124, output: cleanOpencodeOutput(fullOutput, cliTool), rawOutput: fullOutput });
-      }, timeoutMs);
+      const timeoutMs = options.timeoutMs || 0; // 0 means no timeout
+      let timer: NodeJS.Timeout | null = null;
+      
+      if (timeoutMs > 0) {
+        timer = setTimeout(() => {
+          timedOut = true;
+          console.warn(`[TaskRunner] Task ${contextId} timed out after ${timeoutMs / 1000}s. Killing process.`);
+          try {
+            proc.kill('SIGKILL');
+          } catch (e) {
+            console.error(`[TaskRunner] Error killing timed out process:`, e);
+          }
+          this.activeProcesses.delete(contextId);
+          const errMsg = `\n[TIMEOUT] Task timed out after ${Math.round(timeoutMs / 60000)} minutes and was terminated.`;
+          fullOutput += errMsg;
+          if (options.onLog) options.onLog(errMsg, fullOutput);
+          resolve({ exitCode: 124, output: cleanOpencodeOutput(fullOutput, cliTool), rawOutput: fullOutput });
+        }, timeoutMs);
+      }
 
       proc.stdout?.on('data', (data) => {
         const str = data.toString();
@@ -153,7 +155,7 @@ export class TaskRunner {
 
       proc.on('close', (code) => {
         if (timedOut) return;
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         this.activeProcesses.delete(contextId);
 
         const cleanedOutput = cleanOpencodeOutput(fullOutput, cliTool);
@@ -166,7 +168,7 @@ export class TaskRunner {
 
       proc.on('error', (err) => {
         if (timedOut) return;
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         this.activeProcesses.delete(contextId);
         const errMsg = `Failed to start process '${cliTool}': ${err.message}`;
         fullOutput += `\n${errMsg}`;
