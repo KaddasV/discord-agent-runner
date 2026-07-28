@@ -654,34 +654,33 @@ client.on('interactionCreate', async (interaction: Interaction) => {
     }
 
     if (commandName === 'task') {
-      const prompt = cleanPromptInput(interaction.options.getString('prompt', true));
+      const userPrompt = cleanPromptInput(interaction.options.getString('prompt', true));
       const model = interaction.options.getString('model') || config.defaultModel;
-      await handleAgentCommand(interaction, contextId, prompt, model, 'Agent Task');
+      await handleAgentCommand(interaction, contextId, userPrompt, model, 'Custom Task');
       return;
     }
 
     if (commandName === 'ticket') {
       const title = cleanPromptInput(interaction.options.getString('title', true));
-      const desc = cleanPromptInput(interaction.options.getString('description', true));
-      const model = interaction.options.getString('model') || config.defaultModel;
-      const prompt = `Create a GitHub issue in this repository using the GitHub CLI (gh issue create) or appropriate tool with the following details:\nTitle: ${title}\nDescription:\n${desc}\n\nWhen completed, output the URL of the created issue.`;
-      await handleAgentCommand(interaction, contextId, prompt, model, 'GitHub Ticket Creation');
+      const description = cleanPromptInput(interaction.options.getString('description', true));
+      const prompt = `Create a GitHub issue/ticket in this repository with the following details using the GitHub CLI (gh issue create):\n\nTitle: "${title}"\nDescription:\n"${description}"\n\nRun the command and report back the created issue URL.`;
+      await handleAgentCommand(interaction, contextId, prompt, config.defaultModel, 'Create Ticket');
       return;
     }
 
     if (commandName === 'feature') {
       const userPrompt = cleanPromptInput(interaction.options.getString('prompt', true));
       const model = interaction.options.getString('model') || config.defaultModel;
-      const prompt = `Implement the following feature in this codebase autonomously:\n\n"${userPrompt}"\n\nExecute the following workflow strictly:\n1. Always fetch the latest changes from remote (git fetch origin), checkout and pull the 'dev' base branch (or 'develop' / 'main'), and cut a new git feature branch strictly from there.\n2. Write code and implement the feature, including tests.\n3. Verify that tests and build pass.\n4. Commit changes and push the feature branch to remote origin.\n5. Create a separate GitHub Pull Request targeting dev (using gh pr create).\n6. Output the exact link to the newly created Pull Request so it can be reviewed and merged separately. DO NOT auto-merge the PR unless explicitly instructed to in the prompt.`;
-      await handleAgentCommand(interaction, contextId, prompt, model, 'Feature Implementation (Separate PR)');
+      const prompt = `Implement the following feature in this codebase autonomously:\n\n"${userPrompt}"\n\nExecute the following workflow strictly:\n1. Always fetch the latest changes from remote (git fetch origin), checkout and pull the 'dev' base branch (or 'develop' / 'main'), and cut a new git feature branch strictly from there.\n2. Write code and implement the feature, including tests.\n3. Verify that tests and build pass.\n4. Commit changes and push the feature branch to remote origin.\n5. Create a separate GitHub Pull Request targeting dev (using gh pr create) for history and auditability.\n6. Automatically merge the Pull Request into dev on your own (using gh pr merge --merge or gh pr merge --auto --merge).\n7. Ensure the latest version of the application is built and running (e.g. via docker compose up -d --build or deployment scripts).\nReport the PR link, merge status, and deployment results when finished.`;
+      await handleAgentCommand(interaction, contextId, prompt, model, 'Feature Implementation & Deploy');
       return;
     }
 
     if (commandName === 'fix') {
       const userPrompt = cleanPromptInput(interaction.options.getString('prompt', true));
       const model = interaction.options.getString('model') || config.defaultModel;
-      const prompt = `Implement the following bug fix in this codebase autonomously:\n\n"${userPrompt}"\n\nExecute the following workflow strictly:\n1. Always fetch the latest changes from remote (git fetch origin), checkout and pull the 'dev' base branch (or 'develop' / 'main'), and cut a new git bug fix branch (fix/...) strictly from there.\n2. Write code and implement the fix, including tests.\n3. Verify that tests and build pass.\n4. Commit changes and push the fix branch to remote origin.\n5. Create a separate GitHub Pull Request targeting dev (using gh pr create).\n6. Output the exact link to the newly created Pull Request so it can be reviewed and merged separately. DO NOT auto-merge the PR unless explicitly instructed to in the prompt.`;
-      await handleAgentCommand(interaction, contextId, prompt, model, 'Bug Fix (Separate PR)');
+      const prompt = `Implement the following bug fix in this codebase autonomously:\n\n"${userPrompt}"\n\nExecute the following workflow strictly:\n1. Always fetch the latest changes from remote (git fetch origin), checkout and pull the 'dev' base branch (or 'develop' / 'main'), and cut a new git bug fix branch (fix/...) strictly from there.\n2. Write code and implement the fix, including tests.\n3. Verify that tests and build pass.\n4. Commit changes and push the fix branch to remote origin.\n5. Create a separate GitHub Pull Request targeting dev (using gh pr create) for history and auditability.\n6. Automatically merge the Pull Request into dev on your own (using gh pr merge --merge or gh pr merge --auto --merge).\n7. Ensure the latest version of the application is built and running (e.g. via docker compose up -d --build or deployment scripts).\nReport the PR link, merge status, and deployment results when finished.`;
+      await handleAgentCommand(interaction, contextId, prompt, model, 'Bug Fix & Deploy');
       return;
     }
 
