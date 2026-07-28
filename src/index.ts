@@ -491,6 +491,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
           { name: '🚀 `/feature prompt: ...`', value: 'Cut feature branch from dev, implement feature, and open a separate GitHub PR.' },
           { name: '🔧 `/fix prompt: ...`', value: 'Cut bug fix branch from dev, implement bug fix, and open a separate GitHub PR.' },
           { name: '📦 `/release [version] [notes]`', value: 'Inspect repo conventions, bump version, tag, and publish release.' },
+          { name: '🎯 `/grabissue [labels] [model]`', value: 'Auto-grab a non-blocked GitHub issue, implement it, open & merge a PR.' },
           { name: '💬 `/followup id: ... prompt: ...`', value: 'Queue a follow-up command for a previous task result.' },
           { name: '💡 **Direct Chat (No Slash Commands Needed)**', value: 'In your dedicated channel, just type regular chat messages (no quotes or `/task` needed) to send prompts instantly!' },
           { name: '📜 `/result id: ...`', value: 'Fetch full execution logs and downloadable log file for a completed task by ID.' },
@@ -766,6 +767,15 @@ client.on('interactionCreate', async (interaction: Interaction) => {
       const model = interaction.options.getString('model') || config.defaultModel;
       const prompt = `Perform a project release for this repository autonomously.\n\nTarget Version: ${version}\nRelease Notes / Instructions: ${notes}\n\nExecute the following release workflow strictly:\n1. Inspect the repository structure, CLAUDE.md, README, package.json, pom.xml, build.gradle, or CI/CD scripts/workflows to understand how this specific repository handles versioning and releases.\n2. Ensure working directory is clean and on the appropriate release branch (e.g. main, master, or develop depending on repo convention). Pull latest changes.\n3. Bump version numbers in configuration files (e.g. package.json, pom.xml, etc.) as required by repo conventions.\n4. Generate or update changelog/release notes.\n5. Commit the version bump and create a git tag for the release (e.g. git tag -a v... -m "...").\n6. Push commits and tags to remote origin (git push origin --tags).\n7. If GitHub Releases are used, create a GitHub Release using the GitHub CLI (gh release create) with the generated release notes.\n8. Trigger or verify any build, publishing, or deployment pipelines associated with releases in this repository.\nReport the released version, tag URL, GitHub release link, and publishing status when finished.`;
       await handleAgentCommand(interaction, contextId, prompt, model, 'Project Release');
+      return;
+    }
+
+    if (commandName === 'grabissue') {
+      const labels = cleanPromptInput(interaction.options.getString('labels') || '');
+      const model = interaction.options.getString('model') || config.defaultModel;
+      const labelFilter = labels ? `--label "${labels}"` : '';
+      const prompt = `Go to GitHub and grab a non-blocked issue from this repository and implement it autonomously.\n\nExecute the following workflow strictly:\n1. Fetch the latest changes from remote (git fetch origin) and checkout the 'dev' (or 'develop' / 'main') base branch, pulling the latest changes.\n2. Use \`gh issue list --state open --assignee "@me"${labelFilter ? ' ' + labelFilter : ''}\` to first check if there are ANY issues already assigned to you. If there are, pick the oldest/highest-priority assigned issue and implement it.\n3. If no issues are assigned to you, list open, unassigned issues (excluding any with a "blocked" label) using: \`gh issue list --state open --json number,title,labels,assignees --limit 30\` and parse the JSON to find issues that have NO assignees AND do NOT have a label named "blocked".\n4. Pick the most suitable issue to implement (oldest first, or most urgent based on labels like "bug", "enhancement", "high-priority").\n5. Cut a new git feature branch from the base branch specifically for this issue.\n6. Write code and implement the fix/feature described in the issue.\n7. Verify that tests and build pass.\n8. Commit changes with a message referencing the issue (e.g. "feat: #123 description" or "fix: #123 description").\n9. Push the feature branch to remote origin.\n10. Create a GitHub Pull Request targeting the base branch using \`gh pr create\`, referencing the issue in the PR body (e.g. "Closes #123" or "Fixes #123").\n11. Merge the Pull Request automatically using \`gh pr merge --merge\`.\n12. If there are deployment scripts or continuous deployment workflows, ensure the changes are deployed.\nReport the issue that was picked (#number, title, URL), the PR link, merge status, and deployment results when finished.`;
+      await handleAgentCommand(interaction, contextId, prompt, model, 'Grab & Implement Issue');
       return;
     }
   }
