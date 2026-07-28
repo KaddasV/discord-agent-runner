@@ -351,15 +351,13 @@ async function handleAgentCommand(
   model: string,
   commandTitle: string
 ) {
-  let activeRepo = interaction.channel ? repoManager.getRepoFromChannel(interaction.channel) : null;
+  let activeRepo = interaction.channel ? await repoManager.getRepoFromChannel(interaction.channel) : null;
+  const channelName = interaction.channel?.name || interaction.channelId || 'unknown';
+  console.log(`[handleAgentCommand] Channel: "${channelName}" → Resolved repo: "${activeRepo || 'NONE'}"`);
   if (!activeRepo) {
-    activeRepo = repoManager.getActiveRepo(contextId);
-  }
-  if (activeRepo) {
-    repoManager.setActiveRepo(contextId, activeRepo);
-  } else {
+    // Do NOT fall back to getActiveRepo — the user must send commands in a repo channel
     await interaction.reply({
-      content: '❌ No repository associated with this channel! Please run commands inside your `#repo-...` channels, or use `/repo` to select visible repository channels.',
+      content: '❌ No repository associated with this channel! Please run commands inside your `#repo-...` channels.',
       ephemeral: true,
     });
     return;
@@ -698,15 +696,10 @@ client.on('interactionCreate', async (interaction: Interaction) => {
     }
 
     if (commandName === 'verify') {
-      let activeRepo = interaction.channel ? repoManager.getRepoFromChannel(interaction.channel) : null;
+      let activeRepo = interaction.channel ? await repoManager.getRepoFromChannel(interaction.channel) : null;
       if (!activeRepo) {
-        activeRepo = repoManager.getActiveRepo(contextId);
-      }
-      if (activeRepo) {
-        repoManager.setActiveRepo(contextId, activeRepo);
-      } else {
         await interaction.reply({
-          content: '❌ No repository associated with this channel! Please run verify inside your `#repo-...` channel or select one via `/repo`.',
+          content: '❌ No repository associated with this channel! Please run verify inside your `#repo-...` channel.',
           ephemeral: true,
         });
         return;
@@ -906,13 +899,7 @@ client.on('messageCreate', async (message: Message) => {
   if (message.content.startsWith('/') || message.content.startsWith('REQ-')) return;
 
   const contextId = message.channelId || message.author.id;
-  let activeRepo = message.channel ? repoManager.getRepoFromChannel(message.channel) : null;
-  if (!activeRepo) {
-    activeRepo = repoManager.getActiveRepo(contextId);
-  }
-  if (activeRepo) {
-    repoManager.setActiveRepo(contextId, activeRepo);
-  }
+  let activeRepo = message.channel ? await repoManager.getRepoFromChannel(message.channel) : null;
 
   let isAgentChannel = false;
   if (message.channel && 'name' in message.channel && typeof message.channel.name === 'string') {
