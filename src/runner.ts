@@ -70,8 +70,23 @@ export class TaskRunner {
       const claudeMdPath = path.join(repoPath, 'CLAUDE.md');
       const hasClaudeMd = fs.existsSync(claudeMdPath);
 
-      const maxEffortHeader = `[SYSTEM INSTRUCTION: Work with MAX EFFORT, maximum reasoning thoroughness, and comprehensive analysis. Do not give short, lazy, or incomplete summaries. Execute instructions carefully and completely.]\n\n`;
-      const enhancedPrompt = `${maxEffortHeader}${options.prompt}`;
+      const systemPrompt = [
+        `[SYSTEM INSTRUCTIONS — AUTONOMOUS AGENT MODE]`,
+        `You are running as a fully autonomous agent inside a headless CLI. There is NO human at the terminal. stdin is closed.`,
+        ``,
+        `CRITICAL RULES:`,
+        `1. NEVER ask for clarification, confirmation, or user input. You will receive NO response and will hang forever.`,
+        `2. NEVER ask "would you like me to..." or "should I..." — just DO IT.`,
+        `3. If instructions are ambiguous, use your best judgment and proceed.`,
+        `4. If you need to choose between options, pick the most reasonable one and document your choice.`,
+        `5. Work with MAX EFFORT — be thorough, comprehensive, and complete. No lazy summaries.`,
+        `6. Always commit your changes to a new branch, push, and create a PR when making code changes.`,
+        `7. If a CLAUDE.md, AGENTS.md, or .cursorrules file exists in the repo, read and follow its instructions.`,
+        `8. After completing your work, provide a clear summary of what you did.`,
+        ``,
+        `You are working in repository: ${repoPath}`,
+      ].join('\n');
+      const enhancedPrompt = `${systemPrompt}\n\n${options.prompt}`;
 
       // Build CLI arguments for opencode / aider / custom runner
       // OpenCode CLI format: opencode run --prompt "<prompt>" --model "<model>"

@@ -25,6 +25,7 @@ import { repoManager } from './repoManager';
 import { taskRunner, cleanOpencodeOutput } from './runner';
 import { registerSlashCommands } from './commands';
 import { saveTaskLog, getTaskLog } from './logStore';
+import { registerChannelRepo } from './channelRepoMap';
 
 function cleanPromptInput(text: string): string {
   return text.trim().replace(/^["']+|["']+$/g, '').trim();
@@ -135,12 +136,15 @@ async function ensureUserRepoChannels(guild: Guild, userId?: string, visibleRepo
                   },
                 ],
               });
-              console.log(`✅ Auto-created private repo channel '#${channelName}' for user ${uId}`);
+              registerChannelRepo(ch.id, repo.path, repo.name, channelName, uId);
+              console.log(`✅ Auto-created private repo channel '#${channelName}' (${ch.id}) for user ${uId} → ${repo.path}`);
             } catch (err) {
               console.warn(`Failed to create repo channel '#${channelName}':`, err);
             }
           }
         } else {
+          // Channel already exists — ensure mapping is registered
+          registerChannelRepo(ch.id, repo.path, repo.name, ch.name, uId);
           try {
             await ch.permissionOverwrites.edit(uId, {
               ViewChannel: isVisible,
@@ -351,9 +355,10 @@ async function handleAgentCommand(
   model: string,
   commandTitle: string
 ) {
-  let activeRepo = interaction.channel ? await repoManager.getRepoFromChannel(interaction.channel) : null;
-  const channelName = interaction.channel?.name || interaction.channelId || 'unknown';
-  console.log(`[handleAgentCommand] Channel: "${channelName}" → Resolved repo: "${activeRepo || 'NONE'}"`);
+  const channelId = interaction.channelId || interaction.channel?.id;
+  let activeRepo = channelId ? repoManager.getRepoForChannel(channelId) : null;
+  const channelName = interaction.channel?.name || channelId || 'unknown';
+  console.log(`[handleAgentCommand] Channel: "${channelName}" (${channelId}) → Resolved repo: "${activeRepo || 'NONE'}"`);
   if (!activeRepo) {
     // Do NOT fall back to getActiveRepo — the user must send commands in a repo channel
     await interaction.reply({
@@ -697,7 +702,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
     }
 
     if (commandName === 'verify') {
-      let activeRepo = interaction.channel ? await repoManager.getRepoFromChannel(interaction.channel) : null;
+      let activeRepo = interaction.channelId ? repoManager.getRepoForChannel(interaction.channelId) : null;
       if (!activeRepo) {
         await interaction.reply({
           content: '❌ No repository associated with this channel! Please run verify inside your `#repo-...` channel.',
@@ -909,7 +914,7 @@ client.on('messageCreate', async (message: Message) => {
   if (message.content.startsWith('/') || message.content.startsWith('REQ-')) return;
 
   const contextId = message.channelId || message.author.id;
-  let activeRepo = message.channel ? await repoManager.getRepoFromChannel(message.channel) : null;
+  let activeRepo = message.channelId ? repoManager.getRepoForChannel(message.channelId) : null;
 
   let isAgentChannel = false;
   if (message.channel && 'name' in message.channel && typeof message.channel.name === 'string') {
