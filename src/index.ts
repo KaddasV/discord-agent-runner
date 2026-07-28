@@ -16,6 +16,7 @@ import {
   CategoryChannel,
   Guild,
   Message,
+  PermissionFlagsBits,
 } from 'discord.js';
 import path from 'path';
 import fs from 'fs';
@@ -24,10 +25,59 @@ import { repoManager } from './repoManager';
 import { taskRunner, cleanOpencodeOutput } from './runner';
 import { registerSlashCommands } from './commands';
 import { saveTaskLog, getTaskLog } from './logStore';
+import { registerChannelRepo, getMappingForChannel, removeChannelMapping } from './channelRepoMap';
+import { isRepoVisible, setRepoVisible, isRepoRemoved, setRepoRemoved, getRemovedRepoPaths } from './repoPrefs';
+import { listOpenIssues, GhIssue } from './github';
 
-function cleanPromptInput(text?: string | null): string {
-  if (!text) return '';
+function cleanPromptInput(text: string): string {
   return text.trim().replace(/^["']+|["']+$/g, '').trim();
+}
+
+function summarizeIssueBody(body: string): string {
+  const stripped = (body || '')
+    .replace(/```[\s\S]*?```/g, '')
+    .replace(/[#*_>`]/g, '')
+    .replace(/\r?\n+/g, ' ')
+    .trim();
+  if (!stripped) return '*No description provided.*';
+  return stripped.length > 220 ? `${stripped.slice(0, 220).trim()}...` : stripped;
+}
+
+const ISSUES_PER_EMBED = 8;
+
+function buildIssuesEmbeds(repoName: string, issues: GhIssue[]) {
+  const chunks: GhIssue[][] = [];
+  for (let i = 0; i < issues.length; i += ISSUES_PER_EMBED) {
+    chunks.push(issues.slice(i, i + ISSUES_PER_EMBED));
+  }
+
+  return chunks.map((chunk, chunkIndex) => {
+    const embed = new EmbedBuilder().setColor(0x8e5cff);
+
+    if (chunkIndex === 0) {
+      embed
+        .setTitle(`🎫 Open GitHub Issues — ${repoName}`)
+        .setDescription(`Showing \`${issues.length}\` open issue(s).`);
+    }
+
+    for (const issue of chunk) {
+      const tags = issue.labels && issue.labels.length > 0
+        ? issue.labels.map((l) => `\`${l.name}\``).join(' ')
+        : '_no labels_';
+      const summary = summarizeIssueBody(issue.body);
+      const fieldValue = `${tags}\n${summary}\n[View on GitHub ↗](${issue.url})`.slice(0, 1024);
+      embed.addFields({
+        name: `#${issue.number} ${issue.title}`.slice(0, 256),
+        value: fieldValue,
+      });
+    }
+
+    if (chunkIndex === chunks.length - 1) {
+      embed.setFooter({ text: `Use /task or /followup referencing an issue number to start work on it.` });
+    }
+
+    return embed;
+  });
 }
 
 const client = new Client({
@@ -48,31 +98,129 @@ function isInteractionForThisInstance(userId: string): boolean {
   return true;
 }
 
-async function getOrCreateResultsChannel(guild: Guild): Promise<TextChannel | null> {
+async function getOrCreateReleaseChannel(guild: Guild): Promise<TextChannel | null> {
   try {
     const channels = await guild.channels.fetch();
     let category = channels.find(
       (c) => c && c.type === ChannelType.GuildCategory && c.name.toLowerCase().includes('agent')
     ) as CategoryChannel | undefined;
 
-    const resultsChannelName = 'agent-results';
-    let resultsChannel = channels.find(
-      (c) => c && c.type === ChannelType.GuildText && c.name === resultsChannelName
+    const releaseChannelName = 'agent-releases';
+    let releaseChannel = channels.find(
+      (c) => c && c.type === ChannelType.GuildText && c.name === releaseChannelName
     ) as TextChannel | undefined;
 
-    if (!resultsChannel) {
-      resultsChannel = await guild.channels.create({
-        name: resultsChannelName,
+    if (!releaseChannel) {
+      releaseChannel = await guild.channels.create({
+        name: releaseChannelName,
         type: ChannelType.GuildText,
         parent: category?.id,
-        topic: '📊 Task Execution Results & Status Notifications (Whether prompts finished or not)',
+        topic: '🚀 Central Application Redeployments & Release Announcements (All users tagged)',
       });
-      console.log(`✅ Auto-created results channel '#${resultsChannelName}' in '${guild.name}'`);
+      console.log(`✅ Auto-created release channel '#${releaseChannelName}' in '${guild.name}'`);
     }
-    return resultsChannel || null;
+    return releaseChannel || null;
   } catch (err) {
-    console.warn(`Failed to get/create results channel in '${guild?.name}':`, err);
+    console.warn(`Failed to get/create release channel in '${guild?.name}':`, err);
     return null;
+  }
+}
+
+async function ensureUserRepoChannels(guild: Guild, userId?: string, visibleRepos?: string[]) {
+  try {
+    const repos = repoManager.discoverRepositories();
+    const channels = await guild.channels.fetch();
+    let category = channels.find(
+      (c) => c && c.type === ChannelType.GuildCategory && c.name.toLowerCase().includes('agent')
+    ) as CategoryChannel | undefined;
+
+    const targetUserIds: string[] = [];
+    if (userId) {
+      targetUserIds.push(userId);
+    } else if (config.myUserId) {
+      targetUserIds.push(config.myUserId);
+    } else if (config.allowedUserIds.length > 0) {
+      targetUserIds.push(...config.allowedUserIds);
+    }
+
+    for (const uId of targetUserIds) {
+      let cleanUsername = 'user';
+      try {
+        const u = await client.users.fetch(uId);
+        cleanUsername = u.username.toLowerCase().replace(/[^a-z0-9]/g, '');
+      } catch (e) {
+        // ignore
+      }
+
+      for (const repo of repos) {
+        // Permanently removed channels must never be auto-recreated, on startup or otherwise.
+        if (isRepoRemoved(uId, repo.path)) continue;
+
+        const cleanRepoName = repo.name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '');
+        const channelName = `repo-${cleanRepoName}-${cleanUsername}`.slice(0, 100);
+
+        let ch = channels.find(
+          (c) => c && c.type === ChannelType.GuildText && (c.name === channelName || (c.topic && c.topic.includes(repo.path) && c.topic.includes(uId)))
+        ) as TextChannel | undefined;
+
+        // When an explicit selection is given (e.g. from the /repo dropdown), persist it as the
+        // new preference. Otherwise (e.g. on bot startup) fall back to the previously persisted
+        // preference instead of defaulting everything back to visible.
+        let isVisible: boolean;
+        if (visibleRepos) {
+          isVisible = visibleRepos.includes(repo.path) || visibleRepos.includes(repo.name);
+          setRepoVisible(uId, repo.path, isVisible);
+        } else {
+          isVisible = isRepoVisible(uId, repo.path);
+        }
+
+        if (!ch) {
+          if (isVisible) {
+            try {
+              ch = await guild.channels.create({
+                name: channelName,
+                type: ChannelType.GuildText,
+                parent: category?.id,
+                topic: `📂 Repository: ${repo.name} | Path: ${repo.path} | User: ${uId}`,
+                permissionOverwrites: [
+                  {
+                    id: guild.id,
+                    deny: [PermissionFlagsBits.ViewChannel],
+                  },
+                  {
+                    id: uId,
+                    allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory],
+                  },
+                  {
+                    id: client.user!.id,
+                    allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory],
+                  },
+                ],
+              });
+              registerChannelRepo(ch.id, repo.path, repo.name, channelName, uId);
+              console.log(`✅ Auto-created private repo channel '#${channelName}' (${ch.id}) for user ${uId} → ${repo.path}`);
+            } catch (err) {
+              console.warn(`Failed to create repo channel '#${channelName}':`, err);
+            }
+          }
+        } else {
+          // Channel already exists — ensure mapping is registered
+          registerChannelRepo(ch.id, repo.path, repo.name, ch.name, uId);
+          try {
+            await ch.permissionOverwrites.edit(uId, {
+              ViewChannel: isVisible,
+              SendMessages: isVisible,
+              ReadMessageHistory: isVisible,
+            });
+            console.log(`✅ Updated visibility for repo channel '#${ch.name}' to ${isVisible} for user ${uId}`);
+          } catch (err) {
+            console.warn(`Failed to update permissions on '${ch.name}':`, err);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('Error in ensureUserRepoChannels:', err);
   }
 }
 
@@ -116,18 +264,25 @@ async function executeAndReportTask(task: QueuedTask, initialInteraction?: any):
       { name: 'User', value: `<@${userId}>`, inline: true },
       { name: 'Repository', value: `\`${activeRepo}\``, inline: true },
       { name: 'Model', value: `\`${model}\``, inline: true },
-      { name: 'Instruction', value: `"${prompt}"` }
+      { name: 'Instruction', value: `"${prompt.length > 500 ? prompt.slice(0, 500) + '...' : prompt}"` }
     )
     .setFooter({ text: 'Executing locally on developer PC via OpenCode CLI...' });
 
+  const killRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`kill_btn_${contextId}`)
+      .setLabel('🛑 Kill Execution')
+      .setStyle(ButtonStyle.Danger)
+  );
+
   let progressMessage: any = null;
   if (initialInteraction) {
-    await initialInteraction.editReply({ embeds: [startEmbed] }).catch(() => {});
+    await initialInteraction.editReply({ embeds: [startEmbed], components: [killRow] }).catch(() => {});
   } else {
     try {
       const channel = await client.channels.fetch(channelId).catch(() => null) as TextChannel | null;
       if (channel) {
-        progressMessage = await channel.send({ content: `<@${userId}>`, embeds: [startEmbed] });
+        progressMessage = await channel.send({ content: `<@${userId}>`, embeds: [startEmbed], components: [killRow] });
       }
     } catch (e) {
       console.error(`[TaskQueue Error] Failed to send startEmbed for ${requestId}:`, e);
@@ -147,9 +302,9 @@ async function executeAndReportTask(task: QueuedTask, initialInteraction?: any):
       .setDescription(`⏳ **Status: In Progress...**\n*Latest Output / Activity:*\n\`\`\`\n${snippet || '(Running...)'}\n\`\`\``);
 
     if (initialInteraction) {
-      await initialInteraction.editReply({ embeds: [progressEmbed] }).catch(() => {});
+      await initialInteraction.editReply({ embeds: [progressEmbed], components: [killRow] }).catch(() => {});
     } else if (progressMessage) {
-      await progressMessage.edit({ embeds: [progressEmbed] }).catch(() => {});
+      await progressMessage.edit({ embeds: [progressEmbed], components: [killRow] }).catch(() => {});
     }
   };
 
@@ -159,7 +314,7 @@ async function executeAndReportTask(task: QueuedTask, initialInteraction?: any):
       repoPath: activeRepo,
       prompt,
       model,
-      timeoutMs: 15 * 60 * 1000,
+      timeoutMs: 0,
       onLog: (_chunk, fullOutput) => {
         if (fullOutput) updateProgressEmbed(fullOutput);
       },
@@ -204,14 +359,14 @@ async function executeAndReportTask(task: QueuedTask, initialInteraction?: any):
         .setStyle(ButtonStyle.Secondary)
     );
 
-    let redeployAnnouncement = '';
     const isRunnerApp = repoName.toLowerCase().includes('discord-agent-runner');
     const isDeployOrUpdate = /deploy|redeploy|release|docker|push|build|restart|update|pr|merge/i.test(prompt) || /deploy|redeploy|release|docker|push|build|restart|update/i.test(fullOutputText);
 
-    if (isRunnerApp && success && isDeployOrUpdate) {
+    if (isRunnerApp && success && isDeployOrUpdate && guild) {
       try {
-        let userTags = '@here @everyone';
-        if (guild) {
+        const releaseChannel = await getOrCreateReleaseChannel(guild);
+        if (releaseChannel) {
+          let userTags = '@here @everyone';
           try {
             const members = await guild.members.fetch();
             const nonBotMembers = members.filter((m) => !m.user.bot);
@@ -221,61 +376,44 @@ async function executeAndReportTask(task: QueuedTask, initialInteraction?: any):
           } catch (intentErr) {
             userTags = '@here @everyone';
           }
+          await releaseChannel.send({
+            content: `🚨 **APPLICATION REDEPLOYMENT / RELEASE** (${userTags}):\nThe \`discord-agent-runner\` app has just been modified and redeployed! Please pull the latest version and restart your app/container instance (e.g. \`git pull && docker compose up -d --build --force-recreate\`).`,
+            embeds: [completionEmbed],
+          });
         }
-        redeployAnnouncement = `\n\n🚨 **ATTENTION ALL USERS** (${userTags}):\nThe \`discord-agent-runner\` app has just been modified and redeployed! Please pull the latest version and spin up your app/container instance (e.g. \`git pull && docker-compose up -d --build --force-recreate\`).`;
       } catch (e) {
-        // If that's not possible, skip it
-        console.log('[Redeploy Notice] Skipped tagging all users:', e);
+        console.log('[Redeploy Notice] Skipped posting to release channel:', e);
       }
+    }
+
+    const replyPayload: any = { content: `<@${userId}> 🔔 Task \`${requestId}\` completed!`, embeds: [completionEmbed], components: [followUpRow] };
+    const files: any[] = [];
+    if (result.output && result.output.length > 1800) {
+      const buffer = Buffer.from(result.output, 'utf-8');
+      files.push(new AttachmentBuilder(buffer, { name: `task-${requestId}-summary.txt` }));
+    }
+    if (result.rawOutput) {
+      const rawBuffer = Buffer.from(result.rawOutput, 'utf-8');
+      files.push(new AttachmentBuilder(rawBuffer, { name: `task-${requestId}-execution.log` }));
+    }
+    if (files.length > 0) {
+      replyPayload.files = files;
     }
 
     if (initialInteraction) {
       if (initialInteraction.channel && initialInteraction.channel instanceof TextChannel) {
-        await initialInteraction.channel.send({ content: `<@${userId}>${redeployAnnouncement}`, embeds: [completionEmbed], components: [followUpRow] }).catch(() => {});
+        await initialInteraction.channel.send(replyPayload).catch(() => {});
       } else {
-        await initialInteraction.followUp({ content: `<@${userId}>${redeployAnnouncement}`, embeds: [completionEmbed], components: [followUpRow] }).catch(() => {});
+        await initialInteraction.followUp(replyPayload).catch(() => {});
       }
     } else {
       try {
         const channel = await client.channels.fetch(channelId).catch(() => null) as TextChannel | null;
         if (channel) {
-          await channel.send({ content: `<@${userId}>${redeployAnnouncement}`, embeds: [completionEmbed], components: [followUpRow] });
+          await channel.send(replyPayload);
         }
       } catch (e) {
-        console.error(`[TaskQueue Error] Failed to send completionEmbed for ${requestId}:`, e);
-      }
-    }
-
-    if (guild) {
-      try {
-        const resultsChannel = await getOrCreateResultsChannel(guild);
-        if (resultsChannel) {
-          const statusEmbed = new EmbedBuilder()
-            .setTitle(success ? `✅ Task Execution Finished [${requestId}]` : `❌ Task Execution Failed [${requestId}]`)
-            .setColor(success ? 0x2ecc71 : 0xe74c3c)
-            .setDescription(success ? `The OpenCode prompt executed and finished successfully.` : `The OpenCode prompt failed during execution (Exit Code: ${result.exitCode}).`)
-            .addFields(
-              { name: 'Request ID', value: `\`${requestId}\``, inline: true },
-              { name: 'Status', value: success ? '✅ Finished Successfully' : `❌ Error (${result.exitCode})`, inline: true },
-              { name: 'User', value: `<@${userId}>`, inline: true },
-              { name: 'Repository', value: `\`${repoName}\``, inline: true },
-              { name: 'Channel', value: `<#${channelId}>`, inline: true },
-              { name: 'Model', value: `\`${model}\``, inline: true },
-              { name: 'Inspect Logs & Results', value: `Use \`/result id:${requestId}\` to download full logs & view output`, inline: false },
-              { name: 'Prompt', value: `"${prompt.length > 250 ? prompt.slice(0, 250) + '...' : prompt}"`, inline: false }
-            )
-            .setFooter({ text: `Type /result id:${requestId} or click below to queue a follow-up.` })
-            .setTimestamp();
-
-          await resultsChannel.send({
-            content: `<@${userId}> 🔔 Your task \`${requestId}\` has finished executing! Type \`/result id:${requestId}\` to access the full logs and result details.${redeployAnnouncement}`,
-            embeds: [statusEmbed],
-            components: [followUpRow],
-          });
-          console.log(`[TaskResult] Posted completion status for ${requestId} to #${resultsChannel.name}`);
-        }
-      } catch (err) {
-        console.error(`[TaskResult Error] Failed to send notification to results channel:`, err);
+        console.error(`[TaskQueue Error] Failed to send completionPayload for ${requestId}:`, e);
       }
     }
 
@@ -292,10 +430,14 @@ async function handleAgentCommand(
   model: string,
   commandTitle: string
 ) {
-  const activeRepo = repoManager.getActiveRepo(contextId);
+  const channelId = interaction.channelId || interaction.channel?.id;
+  let activeRepo = channelId ? repoManager.getRepoForChannel(channelId) : null;
+  const channelName = interaction.channel?.name || channelId || 'unknown';
+  console.log(`[handleAgentCommand] Channel: "${channelName}" (${channelId}) → Resolved repo: "${activeRepo || 'NONE'}"`);
   if (!activeRepo) {
+    // Do NOT fall back to getActiveRepo — the user must send commands in a repo channel
     await interaction.reply({
-      content: '❌ No repository selected! Run `/repo` first to choose a project folder.',
+      content: '❌ No repository associated with this channel! Please run commands inside your `#repo-...` channels.',
       ephemeral: true,
     });
     return;
@@ -392,8 +534,8 @@ client.once('ready', async () => {
           // Ignore missing permissions if channel creation fails
         }
       }
-
-      await getOrCreateResultsChannel(guild);
+      await ensureUserRepoChannels(guild);
+      await getOrCreateReleaseChannel(guild);
     }
   } catch (err) {
     console.warn('Channel auto-check completed.');
@@ -405,13 +547,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
   console.log(`[Interaction] Received ${interaction.type} (command/customId: ${interaction.isChatInputCommand() ? interaction.commandName : (interaction.isStringSelectMenu() ? interaction.customId : 'other')}) from ${userTag}`);
 
   if (!isInteractionForThisInstance(interaction.user.id)) {
-    console.warn(`[Interaction] ⚠️ Ignored unauthorized user ${userTag}. Bound to MY_USER_ID="${config.myUserId}" / ALLOWED="${config.allowedUserIds.join(',')}"`);
-    if (interaction.isRepliable()) {
-      await interaction.reply({
-        content: `⚠️ Unauthorized: This container instance is dedicated to user ID \`${config.myUserId || config.allowedUserIds.join(', ')}\`.`,
-        ephemeral: true,
-      }).catch(() => {});
-    }
+    console.log(`[Interaction] Ignored interaction from ${userTag} (bound to MY_USER_ID="${config.myUserId}" / ALLOWED="${config.allowedUserIds.join(',')}")`);
     return;
   }
 
@@ -427,11 +563,15 @@ client.on('interactionCreate', async (interaction: Interaction) => {
         .setColor(0x5865f2)
         .setDescription('Control your PC\'s AI coding agents remotely from Discord!')
         .addFields(
-          { name: '📁 `/repo`', value: 'Select or switch target repository from dropdown menu.' },
+          { name: '📁 `/repo`', value: 'Select or switch target repository from dropdown menu; also restores permanently removed channels.' },
+          { name: '🗑️ `/removechannel`', value: 'Run inside a repo channel to permanently delete it and block it from being auto-recreated.' },
           { name: '⚡ `/task prompt: ...`', value: 'Run any instruction for the agent without quotes (ssh somewhere, research a topic, code).' },
           { name: '🎫 `/ticket title: ... description: ...`', value: 'Create a GitHub issue/ticket in this repository without quotes.' },
-          { name: '🚀 `/feature prompt: ...`', value: 'Cut branch from latest develop, implement feature, PR, merge & deploy.' },
+          { name: '📋 `/issues [labels] [limit]`', value: 'List open GitHub issues for this repository with summaries and tags.' },
+          { name: '🚀 `/feature prompt: ...`', value: 'Cut feature branch from dev, implement feature, and open a separate GitHub PR.' },
+          { name: '🔧 `/fix prompt: ...`', value: 'Cut bug fix branch from dev, implement bug fix, and open a separate GitHub PR.' },
           { name: '📦 `/release [version] [notes]`', value: 'Inspect repo conventions, bump version, tag, and publish release.' },
+          { name: '🎯 `/grabissue [labels] [model]`', value: 'Auto-grab a non-blocked GitHub issue, implement it, open & merge a PR.' },
           { name: '💬 `/followup id: ... prompt: ...`', value: 'Queue a follow-up command for a previous task result.' },
           { name: '💡 **Direct Chat (No Slash Commands Needed)**', value: 'In your dedicated channel, just type regular chat messages (no quotes or `/task` needed) to send prompts instantly!' },
           { name: '📜 `/result id: ...`', value: 'Fetch full execution logs and downloadable log file for a completed task by ID.' },
@@ -446,7 +586,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
     }
 
     if (commandName === 'repo') {
-      console.log(`[Command /repo] Executing for user ${interaction.user.username}`);
+      console.log(`[Command /repo] Executing channel manager for user ${interaction.user.username}`);
       try {
         const repos = repoManager.discoverRepositories();
         console.log(`[Command /repo] Found ${repos.length} repos in ${config.reposDir}`);
@@ -458,39 +598,79 @@ client.on('interactionCreate', async (interaction: Interaction) => {
           return;
         }
 
-        const activeRepo = repoManager.getActiveRepo(contextId);
+        const channels = interaction.guild ? await interaction.guild.channels.fetch() : null;
+        const cleanUsername = interaction.user.username.toLowerCase().replace(/[^a-z0-9]/g, '');
 
-        const options = repos.map((r) => {
+        const removedPaths = getRemovedRepoPaths(interaction.user.id);
+        const activeRepos = repos.filter((r) => !removedPaths.includes(r.path));
+        const removedRepos = repos.filter((r) => removedPaths.includes(r.path));
+
+        const options = activeRepos.map((r) => {
           const desc = `${r.hasClaudeMd ? '📄 CLAUDE.md | ' : ''}${r.path}`;
+          const cleanRepoName = r.name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '');
+          const channelName = `repo-${cleanRepoName}-${cleanUsername}`.slice(0, 100);
+          const ch = channels ? channels.find(c => c && c.type === ChannelType.GuildText && c.name === channelName) : null;
+          let isVisible = true;
+          if (ch && interaction.guild) {
+            const overwrite = ch.permissionOverwrites.cache.get(interaction.user.id);
+            if (overwrite && overwrite.deny.has(PermissionFlagsBits.ViewChannel)) {
+              isVisible = false;
+            }
+          }
           return {
             label: r.name.slice(0, 100),
             description: desc.slice(0, 100),
             value: r.name.slice(0, 100),
-            default: activeRepo === r.path || activeRepo === r.name,
+            default: isVisible,
           };
         });
 
-        const selectMenu = new StringSelectMenuBuilder()
-          .setCustomId(`select_repo_${interaction.user.id}`)
-          .setPlaceholder('📁 Choose repository to work on...')
-          .addOptions(options.slice(0, 25));
+        const components: ActionRowBuilder<StringSelectMenuBuilder>[] = [];
 
-        const row = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(selectMenu);
+        if (options.length > 0) {
+          const selectMenu = new StringSelectMenuBuilder()
+            .setCustomId(`select_repo_${interaction.user.id}`)
+            .setPlaceholder('📁 Select repository channels to SHOW in your sidebar...')
+            .setMinValues(0)
+            .setMaxValues(Math.min(options.length, 25))
+            .addOptions(options.slice(0, 25));
+          components.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(selectMenu));
+        }
+
+        if (removedRepos.length > 0) {
+          const restoreMenu = new StringSelectMenuBuilder()
+            .setCustomId(`restore_repo_${interaction.user.id}`)
+            .setPlaceholder('♻️ Restore permanently removed repo channels...')
+            .setMinValues(0)
+            .setMaxValues(Math.min(removedRepos.length, 25))
+            .addOptions(
+              removedRepos.slice(0, 25).map((r) => ({
+                label: r.name.slice(0, 100),
+                description: r.path.slice(0, 100),
+                value: r.name.slice(0, 100),
+              }))
+            );
+          components.push(new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(restoreMenu));
+        }
 
         const repoEmbed = new EmbedBuilder()
-          .setTitle('📂 Repository Selector')
+          .setTitle('📂 Repository Channel Manager')
           .setColor(0x00ffaa)
           .setDescription(
-            activeRepo
-              ? `Current Active Repo: \`${path.basename(activeRepo)}\` (\`${activeRepo}\`)`
-              : 'No repository currently selected for this session.'
+            `Each repository gets a dedicated, private text channel (\`#repo-<name>-...\`).\n\n` +
+            `Use the dropdown menu below to select which repository channels you want **visible** in your Discord sidebar. Any unselected repositories will be hidden from your view (message history is preserved).\n\n` +
+            `To permanently delete a channel and stop it from ever being auto-recreated, run \`/removechannel\` inside that channel.` +
+            (removedRepos.length > 0
+              ? `\n\n♻️ You have \`${removedRepos.length}\` permanently removed repo channel(s): ${removedRepos.map((r) => `\`${r.name}\``).join(', ')}. Use the second dropdown below to restore them.`
+              : '')
           );
 
         await interaction.reply({
           embeds: [repoEmbed],
-          components: [row],
+          components,
+          ephemeral: true,
         });
-        console.log(`[Command /repo] Successfully displayed repository dropdown menu.`);
+        console.log(`[Command /repo] Successfully displayed repository channel manager.`);
       } catch (err: any) {
         console.error(`[Command /repo Error] Failed to execute /repo:`, err);
         if (interaction.isRepliable()) {
@@ -500,6 +680,46 @@ client.on('interactionCreate', async (interaction: Interaction) => {
           }).catch(() => {});
         }
       }
+      return;
+    }
+
+    if (commandName === 'removechannel') {
+      const mapping = getMappingForChannel(interaction.channelId);
+      if (!mapping) {
+        await interaction.reply({
+          content: `⚠️ This channel isn't a tracked repository channel, so it can't be removed this way.`,
+          ephemeral: true,
+        });
+        return;
+      }
+      if (mapping.userId !== interaction.user.id) {
+        await interaction.reply({
+          content: `⚠️ Only <@${mapping.userId}>, the owner of this repo channel, can remove it.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const confirmRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`confirm_removechannel_${interaction.channelId}`)
+          .setLabel('🗑️ Permanently Remove')
+          .setStyle(ButtonStyle.Danger),
+        new ButtonBuilder()
+          .setCustomId(`cancel_removechannel_${interaction.channelId}`)
+          .setLabel('Cancel')
+          .setStyle(ButtonStyle.Secondary)
+      );
+
+      const warnEmbed = new EmbedBuilder()
+        .setTitle('⚠️ Permanently Remove This Channel?')
+        .setColor(0xe74c3c)
+        .setDescription(
+          `This will **delete** \`#${mapping.channelName}\` (mapped to repo \`${mapping.repoPath}\`) and permanently block it from ever being auto-recreated.\n\n` +
+            `You can bring it back later via \`/repo\` → **Restore permanently removed repo channels**.`
+        );
+
+      await interaction.reply({ embeds: [warnEmbed], components: [confirmRow], ephemeral: true });
       return;
     }
 
@@ -626,10 +846,10 @@ client.on('interactionCreate', async (interaction: Interaction) => {
     }
 
     if (commandName === 'verify') {
-      const activeRepo = repoManager.getActiveRepo(contextId);
+      let activeRepo = interaction.channelId ? repoManager.getRepoForChannel(interaction.channelId) : null;
       if (!activeRepo) {
         await interaction.reply({
-          content: '❌ Please select a repository first using `/repo`.',
+          content: '❌ No repository associated with this channel! Please run verify inside your `#repo-...` channel.',
           ephemeral: true,
         });
         return;
@@ -652,27 +872,71 @@ client.on('interactionCreate', async (interaction: Interaction) => {
       return;
     }
 
+    if (commandName === 'issues') {
+      let activeRepo = interaction.channelId ? repoManager.getRepoForChannel(interaction.channelId) : null;
+      if (!activeRepo) {
+        await interaction.reply({
+          content: '❌ No repository associated with this channel! Please run `/issues` inside your `#repo-...` channel.',
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const labels = cleanPromptInput(interaction.options.getString('labels') || '');
+      const limit = interaction.options.getInteger('limit') || 10;
+
+      await interaction.deferReply();
+
+      const repoName = path.basename(activeRepo);
+      const result = await listOpenIssues(activeRepo, { labels: labels || undefined, limit });
+
+      if (!result.success) {
+        await interaction.editReply({
+          content: `❌ Failed to fetch GitHub issues for **${repoName}**: \`${result.error || 'Unknown error'}\`\n\nMake sure this repo has a GitHub remote and \`gh\` is authenticated (\`GH_TOKEN\`/\`GITHUB_TOKEN\`).`,
+        });
+        return;
+      }
+
+      if (result.issues.length === 0) {
+        await interaction.editReply({
+          content: `✅ No open issues found for **${repoName}**${labels ? ` with label(s) \`${labels}\`` : ''}.`,
+        });
+        return;
+      }
+
+      const embeds = buildIssuesEmbeds(repoName, result.issues);
+      await interaction.editReply({ embeds });
+      return;
+    }
+
     if (commandName === 'task') {
-      const prompt = cleanPromptInput(interaction.options.getString('prompt', true));
+      const userPrompt = cleanPromptInput(interaction.options.getString('prompt', true));
       const model = interaction.options.getString('model') || config.defaultModel;
-      await handleAgentCommand(interaction, contextId, prompt, model, 'Agent Task');
+      await handleAgentCommand(interaction, contextId, userPrompt, model, 'Custom Task');
       return;
     }
 
     if (commandName === 'ticket') {
       const title = cleanPromptInput(interaction.options.getString('title', true));
-      const desc = cleanPromptInput(interaction.options.getString('description', true));
-      const model = interaction.options.getString('model') || config.defaultModel;
-      const prompt = `Create a GitHub issue in this repository using the GitHub CLI (gh issue create) or appropriate tool with the following details:\nTitle: ${title}\nDescription:\n${desc}\n\nWhen completed, output the URL of the created issue.`;
-      await handleAgentCommand(interaction, contextId, prompt, model, 'GitHub Ticket Creation');
+      const description = cleanPromptInput(interaction.options.getString('description', true));
+      const prompt = `Create a GitHub issue/ticket in this repository with the following details using the GitHub CLI (gh issue create):\n\nTitle: "${title}"\nDescription:\n"${description}"\n\nRun the command and report back the created issue URL.`;
+      await handleAgentCommand(interaction, contextId, prompt, config.defaultModel, 'Create Ticket');
       return;
     }
 
     if (commandName === 'feature') {
       const userPrompt = cleanPromptInput(interaction.options.getString('prompt', true));
       const model = interaction.options.getString('model') || config.defaultModel;
-      const prompt = `Implement the following feature in this codebase autonomously:\n\n"${userPrompt}"\n\nExecute the following workflow strictly:\n1. Always fetch the latest changes from remote (git fetch origin), checkout and pull the latest 'develop' branch (or 'dev' / 'main' if develop does not exist), and cut a new git feature branch strictly from there.\n2. Write code and implement the feature, including tests.\n3. Verify that tests and build pass.\n4. Commit changes and push the feature branch to remote origin.\n5. Create a GitHub Pull Request targeting develop (using gh pr create).\n6. Merge the Pull Request (using gh pr merge).\n7. If there are deployment scripts or continuous deployment workflows, ensure the feature is deployed or trigger the deployment.\nReport the PR link, merge status, and deployment results when finished.`;
+      const prompt = `Implement the following feature in this codebase autonomously:\n\n"${userPrompt}"\n\nExecute the following workflow strictly:\n1. Always fetch the latest changes from remote (git fetch origin), checkout and pull the 'dev' base branch (or 'develop' / 'main'), and cut a new git feature branch strictly from there.\n2. Write code and implement the feature, including tests.\n3. Verify that tests and build pass.\n4. Commit changes and push the feature branch to remote origin.\n5. Create a separate GitHub Pull Request targeting dev (using gh pr create) for history and auditability.\n6. Automatically merge the Pull Request into dev on your own (using gh pr merge --merge or gh pr merge --auto --merge).\n7. Ensure the latest version of the application is built and running (e.g. via docker compose up -d --build or deployment scripts).\nReport the PR link, merge status, and deployment results when finished.`;
       await handleAgentCommand(interaction, contextId, prompt, model, 'Feature Implementation & Deploy');
+      return;
+    }
+
+    if (commandName === 'fix') {
+      const userPrompt = cleanPromptInput(interaction.options.getString('prompt', true));
+      const model = interaction.options.getString('model') || config.defaultModel;
+      const prompt = `Implement the following bug fix in this codebase autonomously:\n\n"${userPrompt}"\n\nExecute the following workflow strictly:\n1. Always fetch the latest changes from remote (git fetch origin), checkout and pull the 'dev' base branch (or 'develop' / 'main'), and cut a new git bug fix branch (fix/...) strictly from there.\n2. Write code and implement the fix, including tests.\n3. Verify that tests and build pass.\n4. Commit changes and push the fix branch to remote origin.\n5. Create a separate GitHub Pull Request targeting dev (using gh pr create) for history and auditability.\n6. Automatically merge the Pull Request into dev on your own (using gh pr merge --merge or gh pr merge --auto --merge).\n7. Ensure the latest version of the application is built and running (e.g. via docker compose up -d --build or deployment scripts).\nReport the PR link, merge status, and deployment results when finished.`;
+      await handleAgentCommand(interaction, contextId, prompt, model, 'Bug Fix & Deploy');
       return;
     }
 
@@ -684,45 +948,154 @@ client.on('interactionCreate', async (interaction: Interaction) => {
       await handleAgentCommand(interaction, contextId, prompt, model, 'Project Release');
       return;
     }
+
+    if (commandName === 'grabissue') {
+      const labels = cleanPromptInput(interaction.options.getString('labels') || '');
+      const model = interaction.options.getString('model') || config.defaultModel;
+      const labelFilter = labels ? `--label "${labels}"` : '';
+      const prompt = `Go to GitHub and grab a non-blocked issue from this repository and implement it autonomously.
+
+Execute the following workflow strictly:
+1. Fetch the latest changes from remote (git fetch origin) and checkout the 'dev' (or 'develop' / 'main') base branch, pulling the latest changes.
+2. Check if you have assigned issues: \`gh issue list --state open --assignee "@me"${labelFilter ? ' ' + labelFilter : ''}\`. If yes, pick one and proceed to step 5.
+3. If NO issues were found in step 2, you MUST list unassigned issues. Run this exact command to find them: \`gh issue list --state open --search "no:assignee -label:blocked" --limit 10${labelFilter ? ' ' + labelFilter : ''}\`.
+4. Pick the most suitable issue from the list in step 3. YOU MUST PICK AN ISSUE AND CONTINUE. Do not stop here.
+5. Cut a new git feature branch from the base branch specifically for this issue.
+6. Write code and implement the fix/feature described in the issue.
+7. Verify that tests and build pass.
+8. Commit changes with a message referencing the issue (e.g. "feat: #123 description" or "fix: #123 description").
+9. Push the feature branch to remote origin.
+10. Create a GitHub Pull Request targeting the base branch using \`gh pr create\`, referencing the issue in the PR body (e.g. "Closes #123").
+11. Merge the Pull Request automatically using \`gh pr merge --merge\`.
+12. Ensure changes are deployed if applicable.
+Report the issue that was picked (#number, title, URL), the PR link, and merge status when finished.`;
+      await handleAgentCommand(interaction, contextId, prompt, model, 'Grab & Implement Issue');
+      return;
+    }
   }
 
   // Handle Dropdown Menu Selection (/repo dropdown)
   if (interaction.isStringSelectMenu() && interaction.customId.startsWith('select_repo')) {
     console.log(`[SelectMenu] Received selection from ${interaction.user.username}:`, interaction.values);
     try {
-      const selectedValue = interaction.values[0];
-      const repos = repoManager.discoverRepositories();
-      const foundRepo = repos.find((r) => r.name === selectedValue || r.path === selectedValue);
-      const selectedRepoPath = foundRepo ? foundRepo.path : selectedValue;
+      if (!interaction.guild) {
+        await interaction.update({
+          content: `⚠️ Repository channel management is only available within a Discord server (guild).`,
+          embeds: [],
+          components: [],
+        });
+        return;
+      }
 
-      repoManager.setActiveRepo(contextId, selectedRepoPath);
-
-      const repoName = path.basename(selectedRepoPath);
-      const hasClaudeMd = fs.existsSync(path.join(selectedRepoPath, 'CLAUDE.md'));
+      const selectedValues = interaction.values;
+      await ensureUserRepoChannels(interaction.guild, interaction.user.id, selectedValues);
 
       const activeEmbed = new EmbedBuilder()
-        .setTitle(`✅ Target Repository Set: ${repoName}`)
+        .setTitle(`✅ Repository Channels Updated`)
         .setColor(0x2ecc71)
         .setDescription(
-          `Target directory set to:\n\`${selectedRepoPath}\`\n\n` +
-            `${hasClaudeMd ? '📄 **CLAUDE.md Detected**: OpenCode CLI will respect repository guidelines.\n\n' : ''}` +
-            `Send instructions via \`/task prompt: "..."\`.`
+          `We have updated your visible repository channels in this server.\n\n` +
+            `Selected Repositories Visible: \`${selectedValues.length}\`\n\n` +
+            `Check your Discord sidebar for your dedicated \`#repo-...\` channels! Work related to each repo should be requested directly inside its respective channel.`
         );
 
       await interaction.update({
         embeds: [activeEmbed],
         components: [],
       });
-      console.log(`[SelectMenu] Updated active repo for context ${contextId} to: ${selectedRepoPath}`);
+      console.log(`[SelectMenu] Updated visible repo channels for user ${interaction.user.id}:`, selectedValues);
     } catch (err: any) {
       console.error(`[SelectMenu Error] Failed to handle dropdown selection:`, err);
       if (interaction.isRepliable()) {
         await interaction.reply({
-          content: `❌ Error setting repository: \`${err.message || err}\``,
+          content: `❌ Error updating repository channels: \`${err.message || err}\``,
           ephemeral: true,
         }).catch(() => {});
       }
     }
+    return;
+  }
+
+  if (interaction.isStringSelectMenu() && interaction.customId.startsWith('restore_repo_')) {
+    console.log(`[SelectMenu] Received restore selection from ${interaction.user.username}:`, interaction.values);
+    try {
+      if (!interaction.guild) {
+        await interaction.update({
+          content: `⚠️ Repository channel management is only available within a Discord server (guild).`,
+          embeds: [],
+          components: [],
+        });
+        return;
+      }
+
+      const selectedNames = interaction.values;
+      const repos = repoManager.discoverRepositories();
+      for (const repo of repos) {
+        if (selectedNames.includes(repo.name)) {
+          setRepoRemoved(interaction.user.id, repo.path, false);
+        }
+      }
+      await ensureUserRepoChannels(interaction.guild, interaction.user.id);
+
+      const restoredEmbed = new EmbedBuilder()
+        .setTitle(`♻️ Repository Channels Restored`)
+        .setColor(0x2ecc71)
+        .setDescription(
+          `Restored \`${selectedNames.length}\` repo channel(s): ${selectedNames.map((n) => `\`${n}\``).join(', ') || 'none'}.\n\n` +
+            `They will reappear as visible channels in your sidebar.`
+        );
+
+      await interaction.update({
+        embeds: [restoredEmbed],
+        components: [],
+      });
+      console.log(`[SelectMenu] Restored repo channels for user ${interaction.user.id}:`, selectedNames);
+    } catch (err: any) {
+      console.error(`[SelectMenu Error] Failed to handle restore selection:`, err);
+      if (interaction.isRepliable()) {
+        await interaction.reply({
+          content: `❌ Error restoring repository channels: \`${err.message || err}\``,
+          ephemeral: true,
+        }).catch(() => {});
+      }
+    }
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId.startsWith('kill_btn_')) {
+    const killContextId = interaction.customId.replace('kill_btn_', '');
+    if (taskRunner.isRunning(killContextId)) {
+      taskRunner.cancelTask(killContextId);
+      await interaction.reply({ content: `🛑 Task execution for this channel has been manually terminated.`, ephemeral: true });
+    } else {
+      await interaction.reply({ content: `⚠️ No active task found to terminate.`, ephemeral: true });
+    }
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId.startsWith('confirm_removechannel_')) {
+    const targetChannelId = interaction.customId.replace('confirm_removechannel_', '');
+    const mapping = getMappingForChannel(targetChannelId);
+    if (!mapping) {
+      await interaction.update({ content: `⚠️ Channel mapping no longer found; nothing to remove.`, embeds: [], components: [] }).catch(() => {});
+      return;
+    }
+
+    setRepoRemoved(mapping.userId, mapping.repoPath, true);
+    removeChannelMapping(targetChannelId);
+    await interaction.update({ content: `✅ Permanently removing \`#${mapping.channelName}\`...`, embeds: [], components: [] }).catch(() => {});
+
+    try {
+      const channel = await client.channels.fetch(targetChannelId).catch(() => null) as TextChannel | null;
+      if (channel) await channel.delete('Permanently removed via /removechannel');
+    } catch (err) {
+      console.error(`[RemoveChannel] Failed to delete channel ${targetChannelId}:`, err);
+    }
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId.startsWith('cancel_removechannel_')) {
+    await interaction.update({ content: `❎ Cancelled. Channel was not removed.`, embeds: [], components: [] }).catch(() => {});
     return;
   }
 
@@ -820,11 +1193,12 @@ client.on('messageCreate', async (message: Message) => {
   if (message.content.startsWith('/') || message.content.startsWith('REQ-')) return;
 
   const contextId = message.channelId || message.author.id;
-  const activeRepo = repoManager.getActiveRepo(contextId);
+  let activeRepo = message.channelId ? repoManager.getRepoForChannel(message.channelId) : null;
 
   let isAgentChannel = false;
   if (message.channel && 'name' in message.channel && typeof message.channel.name === 'string') {
-    if (message.channel.name.toLowerCase().startsWith('agent-')) {
+    const chName = message.channel.name.toLowerCase();
+    if (chName.startsWith('agent-') || chName.startsWith('repo-')) {
       isAgentChannel = true;
     }
   }

@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { config } from './config';
+import { getRepoForChannel } from './channelRepoMap';
 
 export interface RepoInfo {
   name: string;
@@ -78,6 +79,20 @@ class RepoManager {
 
   public getActiveRepo(contextId: string): string | null {
     return this.activeRepoMap.get(contextId) || null;
+  }
+
+  /**
+   * Resolve which repo a channel maps to.
+   * Uses the persistent channel-repo map as the single source of truth.
+   */
+  public getRepoForChannel(channelId: string): string | null {
+    const mapped = getRepoForChannel(channelId);
+    if (mapped) {
+      console.log(`[RepoManager] Channel ${channelId} → repo "${mapped}" (from persistent map)`);
+      return mapped;
+    }
+    console.warn(`[RepoManager] Channel ${channelId} has no persistent mapping.`);
+    return null;
   }
 }
 

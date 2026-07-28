@@ -4,7 +4,7 @@ import { config } from './config';
 export const slashCommands = [
   new SlashCommandBuilder()
     .setName('repo')
-    .setDescription('Select or change the target repository for AI operations'),
+    .setDescription('Manage visible repository channels (#repo-...) in your Discord sidebar'),
 
   new SlashCommandBuilder()
     .setName('task')
@@ -46,11 +46,27 @@ export const slashCommands = [
 
   new SlashCommandBuilder()
     .setName('feature')
-    .setDescription('Cut branch from latest develop, implement feature, PR, merge & deploy')
+    .setDescription('Cut feature branch from dev, implement feature, open PR, auto-merge & deploy')
     .addStringOption((option) =>
       option
         .setName('prompt')
-        .setDescription('Description of the feature to implement and deploy')
+        .setDescription('Description of the feature to implement')
+        .setRequired(true)
+    )
+    .addStringOption((option) =>
+      option
+        .setName('model')
+        .setDescription('AI model override (optional)')
+        .setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('fix')
+    .setDescription('Cut bug fix branch from dev, implement bug fix, open PR, auto-merge & deploy')
+    .addStringOption((option) =>
+      option
+        .setName('prompt')
+        .setDescription('Description of the bug or issue to fix')
         .setRequired(true)
     )
     .addStringOption((option) =>
@@ -81,6 +97,26 @@ export const slashCommands = [
         .setDescription('AI model override (optional)')
         .setRequired(false)
     ),
+
+  new SlashCommandBuilder()
+    .setName('issues')
+    .setDescription('List open GitHub issues for this repository with summaries and tags')
+    .addStringOption((option) =>
+      option
+        .setName('labels')
+        .setDescription('Comma-separated labels to filter issues by (optional)')
+        .setRequired(false)
+    )
+    .addIntegerOption((option) =>
+      option
+        .setName('limit')
+        .setDescription('Max number of issues to show (default 10, max 25)')
+        .setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('removechannel')
+    .setDescription('Permanently delete this repo channel and block it from being auto-recreated'),
 
   new SlashCommandBuilder()
     .setName('status')
@@ -129,6 +165,22 @@ export const slashCommands = [
   new SlashCommandBuilder()
     .setName('help')
     .setDescription('Show help and instructions for the Discord Agent Runner'),
+
+  new SlashCommandBuilder()
+    .setName('grabissue')
+    .setDescription('Grab a non-blocked GitHub issue, implement it, PR, merge & deploy')
+    .addStringOption((option) =>
+      option
+        .setName('labels')
+        .setDescription('Comma-separated labels to filter issues by (optional)')
+        .setRequired(false)
+    )
+    .addStringOption((option) =>
+      option
+        .setName('model')
+        .setDescription('AI model override (optional)')
+        .setRequired(false)
+    ),
 ].map((cmd) => cmd.toJSON());
 
 export async function registerSlashCommands(client?: Client) {
