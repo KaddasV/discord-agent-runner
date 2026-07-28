@@ -244,3 +244,78 @@ own ADR-0001-equivalent should record, with the cost stated, per project-genesis
   own release cadence suggests — needs an owner and a refresh cadence, not just an initial write.
 - None of this has been validated against a real interactive Discord session yet — everything in §4
   is a design proposal, not something run end to end.
+
+## 13. Decided Design Directives & Technical Requirements (2026-07-28 Update)
+
+Following evaluation of Option A, five hard technical requirements were finalized:
+
+1. **Option A Execution Engine**: The system will proceed with Option A (Discord-native UI using step-by-step Modals, Select Menus, and Buttons for interview collection).
+2. **High-Tier Interviewer Model**: The interview phase (`elicit-requirements`) will use a high-capability LLM (e.g. Pro tier) by default to ensure deep technical probing and robust specification extraction, with user-configurable model selection.
+3. **Structured Issue Breakdown with Tiered Agent Tagging**:
+   - Post-interview, the system breaks down requirements into fine-grained GitHub Issues (`gh issue create`).
+   - Every issue is strictly categorized and labeled by complexity:
+     - `tier:low` / `agent:low-tier`: Mechanical UI tweaks, boilerplate, unit tests, single-file edits. Target: Lightweight/Flash models.
+     - `tier:high` / `agent:high-tier`: Architectural logic, multi-file refactors, security/auth, schema migrations. Target: High-tier reasoning models.
+   - Enables multi-tier autonomous subagents to pick up work based on skill/cost profiles.
+4. **Business Requirement Traceability Matrix (`docs/requirements-matrix.md`)**:
+   - The bot outputs a structured report mapping every business requirement to its corresponding GitHub Issue(s) and assigned agent tier.
+   - Rendered in Discord as a summary embed and saved to `docs/requirements-matrix.md` before work execution begins.
+5. **Interactive Sequential Secret Provisioning**:
+   - Instead of bulk input, the bot prompts for required secrets (Stripe, SendGrid, DB URLs) **one by one**.
+   - Each secret is entered strictly via a **Discord Modal** (never in chat logs), automatically saved to `.env` / GitHub Repo Secrets, and advances to the next step.
+
+---
+
+## 14. Architecture Evaluation & Marketability Strategy
+
+### 14.1 Should the Bot and Generator be Merged or Kept Modular?
+
+**Verdict**: Merging into a single monolithic codebase is a **bad long-term idea**, but coupling them via a **Modular Plugin Architecture (Decoupled Micro-Kernel)** is a **winning strategy**.
+
+#### Why a Direct Monolithic Merge is Problematic:
+1. **Tight Coupling Lock-In**: Tying project-genesis directly to Discord makes it impossible to reuse the project generator via CLI, Slack, Web Dashboard, or CI/CD pipelines.
+2. **Different Release Cadences**: Generator rules/templates update frequently as tech stacks evolve (e.g. Next.js 15, Tailwind v4). Discord bot runtime infrastructure changes slowly (gateway API updates, container orchestration).
+
+#### The Winning Architecture: Modular Engine + Adapter Plugins
+```
+┌─────────────────────────────────────────────────────────────┐
+│                 Transport / Client Layer                    │
+│   ┌──────────────────┐ ┌──────────────────┐ ┌─────────────┐   │
+│   │ Discord Bot Client│ │  Slack App Adapter│ │ CLI Runner  │   │
+│   └─────────┬────────┘ └─────────┬────────┘ └──────┬──────┘   │
+└─────────────┼────────────────────┼──────────────────┼─────────┘
+              │                    │                  │
+              ▼                    ▼                  ▼
+┌─────────────────────────────────────────────────────────────┐
+│                 Core Agent Engine (Runner API)               │
+│   - Task Queue Manager & Process Bridge                      │
+│   - Secret Store & Fan-Out Manager                           │
+│   - Issue Router & Agent Tier Dispatcher                     │
+└─────────────────────────────┬───────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                 Project Generator Engine                     │
+│   - Elicitation Protocol Engine                              │
+│   - Stack Selection Matrix & Template Renderer               │
+│   - Integration Pack Registry (Stripe, Auth, S3, Email)     │
+└─────────────────────────────┴───────────────────────────────┘
+```
+
+---
+
+### 14.2 Making it Marketable, Complete, Maintainable & Scalable
+
+#### 1. "AI Software Agency in Discord" (Product Positioning)
+* **Market Concept**: Position the product as a self-hosted or SaaS **Autonomous AI Dev Agency**.
+* **Value Prop**: "Turn your Discord server into a software dev team. Interview an AI Lead, generate production-ready codebases, and let multi-tier AI agents build out tickets in parallel."
+
+#### 2. Multi-Tier Agent Dispatcher & Cost Optimizer
+* **Cost Efficiency Selling Point**: High-tier models (GPT-4o / Claude Opus / Gemini Pro) draft the specs and architecture tickets; low-tier models (Flash / Haiku / GPT-4o-mini) execute the simple tickets.
+* **Auto-Assignment**: Bot monitors open GitHub issues, automatically spawns subagents matching the `agent:low-tier` / `agent:high-tier` tags, and auto-opens Pull Requests.
+
+#### 3. Enterprise-Grade Maintainability & Extensibility
+* **Integration Pack SDK**: Expose a standardized schema (`manifest.json`) for community-built integration packs (e.g., Auth0, Supabase, Twilio, Redis).
+* **Quality Gates & PR Bot**: Integrated CI verification where agents cannot merge PRs unless `npm run build` and unit tests pass, reporting status back to Discord channels.
+* **Auditability & Traceability**: The Requirement Traceability Matrix ensures stakeholders can track ROI and feature progress directly from their phone.
+
