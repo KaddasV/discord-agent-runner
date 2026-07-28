@@ -13,7 +13,7 @@ services:
       # Mount your local projects directory into the container
       # On Windows (PowerShell): ${HOST_WORKSPACE_PATH:-C:/Users/vdkad}:/workspace
       # On Linux/macOS: ${HOST_WORKSPACE_PATH:-$HOME}:/workspace
-      - ${HOST_WORKSPACE_PATH:-C:/Users/vdkad}:/workspace
+      - ${HOST_WORKSPACE_PATH:-C:/Users/vdkad}:/workspace:cached
       # Persistent execution log storage on host
       - ./task_logs:/app/task_logs
       # Optional: Mount OpenCode config for credentials

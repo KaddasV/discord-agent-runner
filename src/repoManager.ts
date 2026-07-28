@@ -11,8 +11,15 @@ export interface RepoInfo {
 
 class RepoManager {
   private activeRepoMap: Map<string, string> = new Map(); // channelId/userId -> repoPath
+  private repoCache: { timestamp: number; repos: RepoInfo[] } | null = null;
+  private readonly CACHE_TTL_MS = 30000; // 30 seconds TTL
 
-  public discoverRepositories(): RepoInfo[] {
+  public discoverRepositories(forceRefresh = false): RepoInfo[] {
+    const now = Date.now();
+    if (!forceRefresh && this.repoCache && now - this.repoCache.timestamp < this.CACHE_TTL_MS) {
+      return this.repoCache.repos;
+    }
+
     const repos: RepoInfo[] = [];
     const baseDir = config.reposDir;
 
@@ -61,6 +68,7 @@ class RepoManager {
       }
     }
 
+    this.repoCache = { timestamp: Date.now(), repos };
     return repos;
   }
 
