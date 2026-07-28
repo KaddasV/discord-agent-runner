@@ -469,13 +469,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
   console.log(`[Interaction] Received ${interaction.type} (command/customId: ${interaction.isChatInputCommand() ? interaction.commandName : (interaction.isStringSelectMenu() ? interaction.customId : 'other')}) from ${userTag}`);
 
   if (!isInteractionForThisInstance(interaction.user.id)) {
-    console.warn(`[Interaction] ⚠️ Ignored unauthorized user ${userTag}. Bound to MY_USER_ID="${config.myUserId}" / ALLOWED="${config.allowedUserIds.join(',')}"`);
-    if (interaction.isRepliable()) {
-      await interaction.reply({
-        content: `⚠️ Unauthorized: This container instance is dedicated to user ID \`${config.myUserId || config.allowedUserIds.join(', ')}\`.`,
-        ephemeral: true,
-      }).catch(() => {});
-    }
+    console.log(`[Interaction] Ignored interaction from ${userTag} (bound to MY_USER_ID="${config.myUserId}" / ALLOWED="${config.allowedUserIds.join(',')}")`);
     return;
   }
 
