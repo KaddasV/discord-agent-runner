@@ -29,7 +29,7 @@ export class TaskRunner {
     return false;
   }
 
-  public executeTask(contextId: string, options: ExecutionOptions): Promise<{ exitCode: number | null; output: string }> {
+  public executeTask(contextId: string, options: ExecutionOptions): Promise<{ exitCode: number | null; output: string; rawOutput: string }> {
     return new Promise((resolve) => {
       const cliTool = options.agentCli || config.agentCli;
       const model = options.model || config.defaultModel;
@@ -38,12 +38,15 @@ export class TaskRunner {
       if (!fs.existsSync(repoPath)) {
         const err = `Directory does not exist: ${repoPath}`;
         if (options.onLog) options.onLog(err);
-        return resolve({ exitCode: 1, output: err });
+        return resolve({ exitCode: 1, output: err, rawOutput: err });
       }
 
       // Check if CLAUDE.md exists
       const claudeMdPath = path.join(repoPath, 'CLAUDE.md');
       const hasClaudeMd = fs.existsSync(claudeMdPath);
+
+      const maxEffortHeader = `[SYSTEM INSTRUCTION: Work with MAX EFFORT, maximum reasoning thoroughness, and comprehensive analysis. Do not give short, lazy, or incomplete summaries. Execute instructions carefully and completely.]\n\n`;
+      const enhancedPrompt = `${maxEffortHeader}${options.prompt}`;
 
       // Build CLI arguments for opencode / aider / custom runner
       // OpenCode CLI format: opencode run --prompt "<prompt>" --model "<model>"
@@ -53,15 +56,15 @@ export class TaskRunner {
         if (model) {
           args.push('--model', model);
         }
-        args.push(options.prompt);
+        args.push(enhancedPrompt);
       } else if (cliTool.includes('aider')) {
-        args = ['--message', options.prompt];
+        args = ['--message', enhancedPrompt];
         if (model) {
           args.push('--model', model);
         }
       } else {
         // Generic fallback
-        args = [options.prompt];
+        args = [enhancedPrompt];
       }
 
       console.log(`[TaskRunner] Executing: ${cliTool} ${args.join(' ')} in ${repoPath}`);
@@ -118,7 +121,7 @@ export class TaskRunner {
         if (options.onFinish) {
           options.onFinish(code, cleanedOutput);
         }
-        resolve({ exitCode: code, output: cleanedOutput });
+        resolve({ exitCode: code, output: cleanedOutput, rawOutput: fullOutput });
       });
 
       proc.on('error', (err) => {
@@ -126,7 +129,7 @@ export class TaskRunner {
         const errMsg = `Failed to start process '${cliTool}': ${err.message}`;
         fullOutput += `\n${errMsg}`;
         if (options.onLog) options.onLog(errMsg);
-        resolve({ exitCode: 1, output: fullOutput });
+        resolve({ exitCode: 1, output: fullOutput, rawOutput: fullOutput });
       });
     });
   }

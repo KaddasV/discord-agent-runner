@@ -127,7 +127,7 @@ async function executeAndReportTask(task: QueuedTask, initialInteraction?: any):
     }
   }
 
-  let result = { exitCode: 1 as number | null, output: '(Error during execution)' };
+  let result = { exitCode: 1 as number | null, output: '(Error during execution)', rawOutput: '(Error during execution)' };
   try {
     result = await taskRunner.executeTask(contextId, {
       repoPath: activeRepo,
@@ -135,7 +135,7 @@ async function executeAndReportTask(task: QueuedTask, initialInteraction?: any):
       model,
     });
   } catch (err: any) {
-    result = { exitCode: 1, output: `Exception in executeTask: ${err.message || err}` };
+    result = { exitCode: 1, output: `Exception in executeTask: ${err.message || err}`, rawOutput: `Exception in executeTask: ${err.message || err}` };
   } finally {
     const success = result.exitCode === 0;
     const fullOutputText = result.output || '(No output recorded)';
@@ -148,6 +148,7 @@ async function executeAndReportTask(task: QueuedTask, initialInteraction?: any):
       repo: activeRepo,
       exitCode: result.exitCode,
       output: fullOutputText,
+      rawOutput: result.rawOutput,
       timestamp: new Date().toISOString(),
     });
 
@@ -316,7 +317,7 @@ client.once('ready', async () => {
     console.log(`🌍 Container Instance listening for shared/allowed users.`);
   }
 
-  await registerSlashCommands();
+  await registerSlashCommands(client);
 
   // Ensure dedicated channel exists per user/instance
   try {

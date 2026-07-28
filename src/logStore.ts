@@ -8,6 +8,7 @@ export interface TaskLogMetadata {
   repo: string;
   exitCode: number | null;
   output: string;
+  rawOutput?: string;
   timestamp: string;
 }
 
@@ -30,15 +31,27 @@ export function saveTaskLog(metadata: TaskLogMetadata): void {
   memoryStore.set(upperId, metadata);
 
   try {
+    const dateStr = new Date(metadata.timestamp || Date.now()).toISOString().split('T')[0];
+    const dateDir = path.join(LOGS_DIR, dateStr);
+    if (!fs.existsSync(dateDir)) {
+      fs.mkdirSync(dateDir, { recursive: true });
+    }
+    // Save inside date folder
+    const jsonPath = path.join(dateDir, `${upperId}.json`);
+    const logPath = path.join(dateDir, `${upperId}.log`);
+
+    const logContent = metadata.rawOutput || metadata.output || '(No output log recorded)';
+    fs.writeFileSync(jsonPath, JSON.stringify(metadata, null, 2), 'utf-8');
+    fs.writeFileSync(logPath, logContent, 'utf-8');
+
+    // Also write to root LOGS_DIR for fast lookup
     if (!fs.existsSync(LOGS_DIR)) {
       fs.mkdirSync(LOGS_DIR, { recursive: true });
     }
-    const jsonPath = path.join(LOGS_DIR, `${upperId}.json`);
-    const logPath = path.join(LOGS_DIR, `${upperId}.log`);
+    fs.writeFileSync(path.join(LOGS_DIR, `${upperId}.json`), JSON.stringify(metadata, null, 2), 'utf-8');
+    fs.writeFileSync(path.join(LOGS_DIR, `${upperId}.log`), logContent, 'utf-8');
 
-    fs.writeFileSync(jsonPath, JSON.stringify(metadata, null, 2), 'utf-8');
-    fs.writeFileSync(logPath, metadata.output || '(No output log recorded)', 'utf-8');
-    console.log(`[LogStore] Saved logs for ${upperId} to disk.`);
+    console.log(`[LogStore] Saved logs for ${upperId} to ${dateDir} and root disk.`);
   } catch (err) {
     console.error(`[LogStore] Error writing log files for ${upperId}:`, err);
   }
@@ -57,21 +70,31 @@ export function getTaskLog(idInput: string): TaskLogMetadata | null {
     }
   }
 
-  // Fallback to disk search
+  // Fallback to disk search across root and date directories
   try {
     if (!fs.existsSync(LOGS_DIR)) return null;
-    const files = fs.readdirSync(LOGS_DIR);
+    const entries = fs.readdirSync(LOGS_DIR, { withFileTypes: true });
     
-    // Look for matching .json file
-    for (const file of files) {
-      if (file.endsWith('.json')) {
-        const base = file.replace('.json', '').toUpperCase();
-        for (const candidate of candidates) {
-          if (base === candidate || base.includes(cleanId)) {
-            const content = fs.readFileSync(path.join(LOGS_DIR, file), 'utf-8');
-            const parsed: TaskLogMetadata = JSON.parse(content);
-            memoryStore.set(parsed.requestId.toUpperCase(), parsed);
-            return parsed;
+    const dirsToScan: string[] = [LOGS_DIR];
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        dirsToScan.push(path.join(LOGS_DIR, entry.name));
+      }
+    }
+
+    for (const dir of dirsToScan) {
+      if (!fs.existsSync(dir)) continue;
+      const files = fs.readdirSync(dir);
+      for (const file of files) {
+        if (file.endsWith('.json')) {
+          const base = file.replace('.json', '').toUpperCase();
+          for (const candidate of candidates) {
+            if (base === candidate || base.includes(cleanId)) {
+              const content = fs.readFileSync(path.join(dir, file), 'utf-8');
+              const parsed: TaskLogMetadata = JSON.parse(content);
+              memoryStore.set(parsed.requestId.toUpperCase(), parsed);
+              return parsed;
+            }
           }
         }
       }

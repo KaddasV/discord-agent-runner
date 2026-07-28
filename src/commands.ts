@@ -1,4 +1,4 @@
-import { REST, Routes, SlashCommandBuilder } from 'discord.js';
+import { REST, Routes, SlashCommandBuilder, Client } from 'discord.js';
 import { config } from './config';
 
 export const slashCommands = [
@@ -131,7 +131,7 @@ export const slashCommands = [
     .setDescription('Show help and instructions for the Discord Agent Runner'),
 ].map((cmd) => cmd.toJSON());
 
-export async function registerSlashCommands() {
+export async function registerSlashCommands(client?: Client) {
   if (!config.discordToken || !config.clientId) {
     console.warn('⚠️ DISCORD_TOKEN or DISCORD_CLIENT_ID missing in .env. Skipping slash command auto-registration.');
     return;
@@ -140,11 +140,25 @@ export async function registerSlashCommands() {
   const rest = new REST({ version: '10' }).setToken(config.discordToken);
 
   try {
-    console.log('🔄 Registering Discord Slash Commands...');
+    console.log('🔄 Registering Discord Slash Commands globally...');
     await rest.put(Routes.applicationCommands(config.clientId), {
       body: slashCommands,
     });
     console.log('✅ Successfully registered Discord Slash Commands globally.');
+
+    if (client) {
+      for (const [guildId, guild] of client.guilds.cache) {
+        try {
+          console.log(`🔄 Registering Slash Commands for guild ${guild.name} (${guildId})...`);
+          await rest.put(Routes.applicationGuildCommands(config.clientId, guildId), {
+            body: slashCommands,
+          });
+          console.log(`✅ Successfully registered commands instantly in guild ${guild.name}`);
+        } catch (err) {
+          console.error(`❌ Failed guild command registration in ${guildId}:`, err);
+        }
+      }
+    }
   } catch (error) {
     console.error('❌ Failed to register Discord Slash Commands:', error);
   }
