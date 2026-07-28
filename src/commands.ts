@@ -167,6 +167,26 @@ export const slashCommands = [
     .setDescription('Show help and instructions for the Discord Agent Runner'),
 
   new SlashCommandBuilder()
+    .setName('recursive')
+    .setDescription('Continuously grab and implement open GitHub issues until /stoprecursive or the kill button is used')
+    .addStringOption((option) =>
+      option
+        .setName('labels')
+        .setDescription('Comma-separated labels to filter issues by (optional)')
+        .setRequired(false)
+    )
+    .addStringOption((option) =>
+      option
+        .setName('model')
+        .setDescription('AI model override (optional)')
+        .setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('stoprecursive')
+    .setDescription('Stop the recursive issue-implementation loop for this channel'),
+
+  new SlashCommandBuilder()
     .setName('grabissue')
     .setDescription('Grab a non-blocked GitHub issue, implement it, PR, merge & deploy')
     .addStringOption((option) =>

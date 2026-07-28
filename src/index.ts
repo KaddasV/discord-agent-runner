@@ -233,9 +233,93 @@ interface QueuedTask {
   userId: string;
   channelId: string;
   guild: Guild | null;
+  isRecursive?: boolean;
 }
 
 const taskQueue: Map<string, Array<QueuedTask>> = new Map();
+
+interface RecursiveSession {
+  labels?: string;
+  model: string;
+  userId: string;
+  channelId: string;
+  guild: Guild | null;
+  iteration: number;
+  startedAt: number;
+}
+
+const recursiveState: Map<string, RecursiveSession> = new Map();
+
+function buildRecursiveIssuePrompt(labels?: string): string {
+  const labelFilter = labels ? `--label "${labels}"` : '';
+  return `Go to GitHub and grab a non-blocked issue from this repository and implement it autonomously, as one round of an ongoing recursive/continuous implementation loop.
+
+Execute the following workflow strictly:
+1. Fetch the latest changes from remote (git fetch origin) and checkout the 'dev' (or 'develop' / 'main') base branch, pulling the latest changes.
+2. Check if you have assigned issues: \`gh issue list --state open --assignee "@me"${labelFilter ? ' ' + labelFilter : ''}\`. If yes, pick one and proceed to step 6.
+3. If NO issues were found in step 2, list unassigned issues: \`gh issue list --state open --search "no:assignee -label:blocked" --limit 10${labelFilter ? ' ' + labelFilter : ''}\`.
+4. If that list is ALSO empty, output the exact literal text \`NO_ISSUES_AVAILABLE\` on its own line and stop immediately without making any changes.
+5. Otherwise pick the most suitable issue from the list in step 3. YOU MUST PICK AN ISSUE AND CONTINUE.
+6. Cut a new git feature branch from the base branch specifically for this issue.
+7. Write code and implement the fix/feature described in the issue.
+8. Verify that tests and build pass.
+9. Commit changes with a message referencing the issue (e.g. "feat: #123 description" or "fix: #123 description").
+10. Push the feature branch to remote origin.
+11. Create a GitHub Pull Request targeting the base branch using \`gh pr create\`, referencing the issue in the PR body (e.g. "Closes #123").
+12. Merge the Pull Request automatically using \`gh pr merge --merge\`.
+13. Ensure changes are deployed if applicable.
+Report the issue that was picked (#number, title, URL), the PR link, and merge status when finished. If no issue was available, report only \`NO_ISSUES_AVAILABLE\`.`;
+}
+
+async function notifyChannel(channelId: string, content: string): Promise<void> {
+  try {
+    const channel = await client.channels.fetch(channelId).catch(() => null) as TextChannel | null;
+    if (channel) await channel.send(content);
+  } catch (e) {
+    console.warn(`[Recursive] Failed to notify channel ${channelId}:`, e);
+  }
+}
+
+async function runRecursiveIteration(contextId: string): Promise<void> {
+  const session = recursiveState.get(contextId);
+  if (!session) return;
+
+  const activeRepo = repoManager.getRepoForChannel(session.channelId);
+  if (!activeRepo) {
+    recursiveState.delete(contextId);
+    await notifyChannel(session.channelId, `🛑 Recursive implementation loop stopped — this channel no longer has a repository mapping.`);
+    return;
+  }
+
+  const preflight = await listOpenIssues(activeRepo, { labels: session.labels, limit: 1 });
+  if (!preflight.success || preflight.issues.length === 0) {
+    recursiveState.delete(contextId);
+    await notifyChannel(
+      session.channelId,
+      `🏁 Recursive implementation loop stopped for **${path.basename(activeRepo)}** — no open issues remain${session.labels ? ` matching label(s) \`${session.labels}\`` : ''} after \`${session.iteration}\` iteration(s).`
+    );
+    return;
+  }
+
+  session.iteration += 1;
+  const requestId = `REQ-${Date.now().toString().slice(-5)}${Math.floor(10 + Math.random() * 90)}`;
+  const task: QueuedTask = {
+    requestId,
+    contextId,
+    activeRepo,
+    prompt: buildRecursiveIssuePrompt(session.labels),
+    model: session.model,
+    userId: session.userId,
+    channelId: session.channelId,
+    guild: session.guild,
+    isRecursive: true,
+  };
+
+  const queue = taskQueue.get(contextId) || [];
+  queue.push(task);
+  taskQueue.set(contextId, queue);
+  console.log(`[Recursive] Enqueued iteration ${session.iteration} (${requestId}) for ${contextId}`);
+}
 
 async function processNextInQueue(contextId: string): Promise<void> {
   if (taskRunner.isRunning(contextId)) {
@@ -253,7 +337,7 @@ async function processNextInQueue(contextId: string): Promise<void> {
 }
 
 async function executeAndReportTask(task: QueuedTask, initialInteraction?: any): Promise<void> {
-  const { requestId, contextId, activeRepo, prompt, model, userId, channelId, guild } = task;
+  const { requestId, contextId, activeRepo, prompt, model, userId, channelId, guild, isRecursive } = task;
   const repoName = path.basename(activeRepo);
 
   const startEmbed = new EmbedBuilder()
@@ -417,6 +501,21 @@ async function executeAndReportTask(task: QueuedTask, initialInteraction?: any):
       }
     }
 
+    if (isRecursive) {
+      const session = recursiveState.get(contextId);
+      if (session) {
+        if (fullOutputText.toUpperCase().includes('NO_ISSUES_AVAILABLE')) {
+          recursiveState.delete(contextId);
+          await notifyChannel(
+            channelId,
+            `🏁 Recursive implementation loop stopped for **${repoName}** — no more open, implementable issues found after \`${session.iteration}\` iteration(s).`
+          );
+        } else {
+          await runRecursiveIteration(contextId);
+        }
+      }
+    }
+
     setTimeout(() => {
       processNextInQueue(contextId);
     }, 1000);
@@ -572,6 +671,8 @@ client.on('interactionCreate', async (interaction: Interaction) => {
           { name: '🔧 `/fix prompt: ...`', value: 'Cut bug fix branch from dev, implement bug fix, and open a separate GitHub PR.' },
           { name: '📦 `/release [version] [notes]`', value: 'Inspect repo conventions, bump version, tag, and publish release.' },
           { name: '🎯 `/grabissue [labels] [model]`', value: 'Auto-grab a non-blocked GitHub issue, implement it, open & merge a PR.' },
+          { name: '🔁 `/recursive [labels] [model]`', value: 'Continuously grab & implement open issues one after another until `/stoprecursive` or the kill button is used.' },
+          { name: '🛑 `/stoprecursive`', value: 'Stop the recursive issue-implementation loop for this channel.' },
           { name: '💬 `/followup id: ... prompt: ...`', value: 'Queue a follow-up command for a previous task result.' },
           { name: '💡 **Direct Chat (No Slash Commands Needed)**', value: 'In your dedicated channel, just type regular chat messages (no quotes or `/task` needed) to send prompts instantly!' },
           { name: '📜 `/result id: ...`', value: 'Fetch full execution logs and downloadable log file for a completed task by ID.' },
@@ -727,6 +828,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
       const activeRepo = repoManager.getActiveRepo(contextId);
       const running = taskRunner.isRunning(contextId);
       const queue = taskQueue.get(contextId) || [];
+      const recursiveSession = recursiveState.get(contextId);
 
       const statusEmbed = new EmbedBuilder()
         .setTitle('📊 Agent Runner Status')
@@ -737,7 +839,8 @@ client.on('interactionCreate', async (interaction: Interaction) => {
           { name: 'Task Execution Status', value: running ? '⚡ AI Agent is currently RUNNING...' : '💤 Idle', inline: false },
           { name: 'Queued Tasks', value: queue.length > 0 ? `⏳ \`${queue.length}\` task(s) waiting in queue` : '0', inline: true },
           { name: 'Default Model', value: `\`${config.defaultModel}\``, inline: true },
-          { name: 'CLI Tool', value: `\`${config.agentCli}\``, inline: true }
+          { name: 'CLI Tool', value: `\`${config.agentCli}\``, inline: true },
+          { name: 'Recursive Mode', value: recursiveSession ? `🔁 Active (iteration \`${recursiveSession.iteration}\`) — use \`/stoprecursive\` to stop` : '⏹️ Inactive', inline: false }
         );
 
       await interaction.reply({ embeds: [statusEmbed] });
@@ -749,6 +852,7 @@ client.on('interactionCreate', async (interaction: Interaction) => {
       const queue = taskQueue.get(contextId) || [];
       const queueCount = queue.length;
       taskQueue.set(contextId, []); // Clear queue
+      const wasRecursive = recursiveState.delete(contextId);
 
       let msg = '';
       if (canceled && queueCount > 0) {
@@ -759,6 +863,9 @@ client.on('interactionCreate', async (interaction: Interaction) => {
         msg = `🛑 Cleared \`${queueCount}\` queued task(s) (no active task was running).`;
       } else {
         msg = 'ℹ️ No active task or queued tasks found on this channel.';
+      }
+      if (wasRecursive) {
+        msg += ' Recursive implementation loop has also been stopped.';
       }
 
       await interaction.reply({ content: msg });
@@ -972,6 +1079,76 @@ Report the issue that was picked (#number, title, URL), the PR link, and merge s
       await handleAgentCommand(interaction, contextId, prompt, model, 'Grab & Implement Issue');
       return;
     }
+
+    if (commandName === 'recursive') {
+      const channelId = interaction.channelId;
+      const activeRepo = channelId ? repoManager.getRepoForChannel(channelId) : null;
+      if (!activeRepo) {
+        await interaction.reply({
+          content: '❌ No repository associated with this channel! Please run `/recursive` inside your `#repo-...` channel.',
+          ephemeral: true,
+        });
+        return;
+      }
+
+      if (recursiveState.has(contextId)) {
+        const existing = recursiveState.get(contextId)!;
+        await interaction.reply({
+          content: `⚠️ Recursive mode is already running in this channel (iteration \`${existing.iteration}\`). Use \`/stoprecursive\` first if you want to stop it.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const labels = cleanPromptInput(interaction.options.getString('labels') || '');
+      const model = interaction.options.getString('model') || config.defaultModel;
+      const repoName = path.basename(activeRepo);
+
+      recursiveState.set(contextId, {
+        labels: labels || undefined,
+        model,
+        userId: interaction.user.id,
+        channelId,
+        guild: interaction.guild || null,
+        iteration: 0,
+        startedAt: Date.now(),
+      });
+
+      await interaction.deferReply();
+
+      const startEmbed = new EmbedBuilder()
+        .setTitle('🔁 Recursive Implementation Loop Started')
+        .setColor(0x9b59b6)
+        .setDescription(
+          `I will continuously grab and implement open GitHub issues for **${repoName}**, one after another, until you run \`/stoprecursive\` or press the 🛑 Kill Execution button on a running task.` +
+            (labels ? `\n\nFiltering by label(s): \`${labels}\`` : '')
+        )
+        .addFields(
+          { name: 'Model', value: `\`${model}\``, inline: true },
+          { name: 'Started By', value: `<@${interaction.user.id}>`, inline: true }
+        );
+
+      await interaction.editReply({ embeds: [startEmbed] });
+
+      runRecursiveIteration(contextId)
+        .then(() => processNextInQueue(contextId))
+        .catch((e) => console.error('[Recursive] Error starting loop:', e));
+      return;
+    }
+
+    if (commandName === 'stoprecursive') {
+      const session = recursiveState.get(contextId);
+      if (!session) {
+        await interaction.reply({ content: 'ℹ️ Recursive mode is not currently active in this channel.', ephemeral: true });
+        return;
+      }
+
+      recursiveState.delete(contextId);
+      await interaction.reply({
+        content: `🛑 Recursive implementation loop stopped after \`${session.iteration}\` iteration(s). Any task currently running will finish normally, but no new issues will be grabbed afterward.`,
+      });
+      return;
+    }
   }
 
   // Handle Dropdown Menu Selection (/repo dropdown)
@@ -1064,11 +1241,13 @@ Report the issue that was picked (#number, title, URL), the PR link, and merge s
 
   if (interaction.isButton() && interaction.customId.startsWith('kill_btn_')) {
     const killContextId = interaction.customId.replace('kill_btn_', '');
+    const wasRecursive = recursiveState.delete(killContextId);
+    const recursiveNote = wasRecursive ? ' Recursive implementation loop has also been stopped.' : '';
     if (taskRunner.isRunning(killContextId)) {
       taskRunner.cancelTask(killContextId);
-      await interaction.reply({ content: `🛑 Task execution for this channel has been manually terminated.`, ephemeral: true });
+      await interaction.reply({ content: `🛑 Task execution for this channel has been manually terminated.${recursiveNote}`, ephemeral: true });
     } else {
-      await interaction.reply({ content: `⚠️ No active task found to terminate.`, ephemeral: true });
+      await interaction.reply({ content: `⚠️ No active task found to terminate.${recursiveNote}`, ephemeral: true });
     }
     return;
   }
