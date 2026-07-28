@@ -46,11 +46,27 @@ export const slashCommands = [
 
   new SlashCommandBuilder()
     .setName('feature')
-    .setDescription('Cut branch from latest develop, implement feature, PR, merge & deploy')
+    .setDescription('Cut feature branch from dev, implement feature, and open a separate GitHub PR')
     .addStringOption((option) =>
       option
         .setName('prompt')
-        .setDescription('Description of the feature to implement and deploy')
+        .setDescription('Description of the feature to implement')
+        .setRequired(true)
+    )
+    .addStringOption((option) =>
+      option
+        .setName('model')
+        .setDescription('AI model override (optional)')
+        .setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('fix')
+    .setDescription('Cut bug fix branch from dev, implement bug fix, and open a separate GitHub PR')
+    .addStringOption((option) =>
+      option
+        .setName('prompt')
+        .setDescription('Description of the bug or issue to fix')
         .setRequired(true)
     )
     .addStringOption((option) =>
